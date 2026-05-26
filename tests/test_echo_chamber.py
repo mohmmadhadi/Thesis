@@ -8,7 +8,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from social_analysis.echo_chamber import ANTI_ANCHORS, PRO_ANCHORS, StanceEstimator
+from social_analysis.echo_chamber import (
+    ANTI_ANCHORS,
+    PRO_ANCHORS,
+    AttitudeScorer,
+    StanceEstimator,
+)
 
 
 class FakeEmbeddingModel:
@@ -149,3 +154,78 @@ def test_transform_dataframe_returns_notebook_stance_columns_with_fakes():
     assert expected_columns.issubset(result.columns)
     assert result.loc[0, "stance_score_initial"] == 0.5
     assert result.loc[0, "stance_similarity"] > result.loc[1, "stance_similarity"]
+
+
+def test_attitude_score_uses_notebook_formula():
+    scorer = AttitudeScorer()
+
+    result = scorer.calculate_attitude_score(stance=0.5, sentiment=-0.8)
+
+    expected = np.tanh(0.5 * (1 + 0.5 * abs(-0.8)))
+    assert result == pytest.approx(expected)
+
+
+def test_add_sentiment_and_attitude_scores_use_notebook_column_names():
+    scorer = AttitudeScorer()
+    df = pd.DataFrame(
+        {
+            "stance_ensemble": [0.5, -0.5],
+            "roberta_compound": [0.2, -0.4],
+        }
+    )
+
+    result = scorer.transform_dataframe(df)
+
+    assert result["sentiment_score"].tolist() == [0.2, -0.4]
+    assert result["attitude_score"].tolist() == pytest.approx(
+        [
+            np.tanh(0.5 * (1 + 0.5 * 0.2)),
+            np.tanh(-0.5 * (1 + 0.5 * 0.4)),
+        ]
+    )
+
+
+def test_aggregate_user_attitudes_matches_notebook_formulas():
+    user_df = pd.DataFrame(
+        {
+            "attitude_score": [0.2, 0.8],
+            "day": [1, 3],
+            "like": [0, 3],
+            "reaction_count": [2, 5],
+        }
+    )
+
+    result = AttitudeScorer.aggregate_user_attitudes(user_df)
+
+    weights = np.exp(np.array([1, 3]) - 3)
+    assert result["mean_attitude"] == pytest.approx(0.5)
+    assert result["weighted_attitude"] == pytest.approx(
+        np.average([0.2, 0.8], weights=weights)
+    )
+    assert result["engagement_weighted_attitude"] == pytest.approx(
+        np.average([0.2, 0.8], weights=[1, 4])
+    )
+    assert result["attitude_std"] == pytest.approx(np.std([0.2, 0.8]))
+    assert result["num_posts"] == 2
+    assert result["total_likes"] == 3
+    assert result["total_reactions"] == 7
+
+
+def test_compute_user_attitudes_sets_single_post_std_to_nan():
+    scorer = AttitudeScorer()
+    df = pd.DataFrame(
+        {
+            "user_id": [1, 1, 2],
+            "attitude_score": [0.2, 0.8, -0.5],
+            "day": [1, 2, 1],
+            "like": [0, 1, 2],
+            "reaction_count": [1, 2, 3],
+        }
+    )
+
+    result = scorer.compute_user_attitudes(df)
+
+    user_one = result[result["user_id"] == 1].iloc[0]
+    user_two = result[result["user_id"] == 2].iloc[0]
+    assert user_one["attitude_std"] == pytest.approx(np.std([0.2, 0.8]))
+    assert np.isnan(user_two["attitude_std"])

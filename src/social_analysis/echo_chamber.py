@@ -15,6 +15,7 @@ CROSS_ENCODER_MODEL = "cross-encoder/stsb-roberta-base"
 EMBEDDING_BATCH_SIZE = 32
 PRO_STANCE_THRESHOLD = 0.3
 ANTI_STANCE_THRESHOLD = -0.3
+BETA = 0.5
 
 PRO_ANCHORS = [
     "Artificial intelligence will revolutionize healthcare by accelerating drug discovery, curing complex diseases, and ultimately saving countless lives.",
@@ -207,3 +208,93 @@ class StanceEstimator:
             result[text_col].tolist()
         ).values
         return self.fuse_stance_scores(result)
+
+
+class AttitudeScorer:
+    """Compute tweet-level and user-level attitude scores."""
+
+    def __init__(self, beta: float = BETA) -> None:
+        self.beta = beta
+
+    def calculate_attitude_score(self, stance: float, sentiment: float) -> float:
+        """Calculate attitude score from stance and sentiment."""
+        amplifier = 1 + (self.beta * abs(sentiment))
+        attitude = np.tanh(stance * amplifier)
+        return float(np.clip(attitude, -1, 1))
+
+    def add_sentiment_score(
+        self,
+        df: pd.DataFrame,
+        sentiment_col: str = "roberta_compound",
+        output_col: str = "sentiment_score",
+    ) -> pd.DataFrame:
+        """Add the notebook sentiment_score column."""
+        result = df.copy()
+        result[output_col] = result[sentiment_col]
+        return result
+
+    def add_attitude_scores(
+        self,
+        df: pd.DataFrame,
+        stance_col: str = "stance_ensemble",
+        sentiment_col: str = "sentiment_score",
+        output_col: str = "attitude_score",
+    ) -> pd.DataFrame:
+        """Add tweet-level attitude scores."""
+        result = df.copy()
+        result[output_col] = result.apply(
+            lambda row: self.calculate_attitude_score(
+                row[stance_col],
+                row[sentiment_col],
+            ),
+            axis=1,
+        )
+        return result
+
+    @staticmethod
+    def aggregate_user_attitudes(user_df: pd.DataFrame) -> pd.Series:
+        """Aggregate attitudes for one user using notebook formulas."""
+        attitudes = user_df["attitude_score"].values
+        days = user_df["day"].values
+
+        mean_attitude = np.mean(attitudes)
+        weights = np.exp(days - days.max())
+        weighted_attitude = np.average(attitudes, weights=weights)
+        engagement = user_df["like"].values + 1
+        engagement_weighted = np.average(attitudes, weights=engagement)
+
+        return pd.Series(
+            {
+                "mean_attitude": mean_attitude,
+                "weighted_attitude": weighted_attitude,
+                "engagement_weighted_attitude": engagement_weighted,
+                "attitude_std": np.std(attitudes),
+                "num_posts": len(attitudes),
+                "total_likes": user_df["like"].sum(),
+                "total_reactions": user_df["reaction_count"].sum(),
+            }
+        )
+
+    def compute_user_attitudes(
+        self,
+        df: pd.DataFrame,
+        user_col: str = "user_id",
+    ) -> pd.DataFrame:
+        """Aggregate tweet attitudes to user-level attitude summaries."""
+        user_attitudes = (
+            df.groupby(user_col)
+            .apply(self.aggregate_user_attitudes, include_groups=False)
+            .reset_index()
+        )
+        user_attitudes.loc[user_attitudes["num_posts"] < 2, "attitude_std"] = np.nan
+        return user_attitudes
+
+    def transform_dataframe(
+        self,
+        df: pd.DataFrame,
+        sentiment_col: str = "roberta_compound",
+        stance_col: str = "stance_ensemble",
+    ) -> pd.DataFrame:
+        """Add sentiment_score and attitude_score columns."""
+        result = self.add_sentiment_score(df, sentiment_col=sentiment_col)
+        return self.add_attitude_scores(result, stance_col=stance_col)
