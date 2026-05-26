@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from social_analysis.user_clustering import FeatureExtractor
+from social_analysis.user_clustering import FeatureExtractor, TweetClusterer
 
 
 class FakeLemmatizer:
@@ -26,6 +26,39 @@ def make_extractor():
         tokenizer=simple_tokenizer,
         readability_func=lambda text: 42.0,
     )
+
+
+class FakeEmbeddingModel:
+    def __init__(self):
+        self.calls = []
+
+    def encode(self, texts, **kwargs):
+        self.calls.append({"texts": texts, "kwargs": kwargs})
+        return [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]][: len(texts)]
+
+
+class FakeReducer:
+    def fit_transform(self, embeddings):
+        return [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]][: len(embeddings)]
+
+
+class FakeClusterer:
+    def fit_predict(self, embeddings_2d):
+        return [0, 0, -1][: len(embeddings_2d)]
+
+
+class FakeTfidfVectorizer:
+    def __init__(self, max_features=None, stop_words=None):
+        self.max_features = max_features
+        self.stop_words = stop_words
+        self.idf_ = [2.0, 1.0, 3.0, 0.5]
+
+    def fit(self, texts):
+        self.texts = texts
+        return self
+
+    def get_feature_names_out(self):
+        return ["alpha", "beta", "gamma", "delta"]
 
 
 def test_clean_tweet_matches_notebook_rules():
@@ -142,3 +175,77 @@ def test_aggregate_user_rates_matches_notebook_names():
     assert result.columns.tolist() == ["user_id", "mean_emoji_rate", "mean_punct_rate"]
     assert result.loc[result["user_id"] == 1, "mean_emoji_rate"].iloc[0] == pytest.approx(0.1)
     assert result.loc[result["user_id"] == 1, "mean_punct_rate"].iloc[0] == pytest.approx(0.2)
+
+
+def test_tweet_clusterer_prepare_tweets_cleans_and_filters_empty_rows():
+    clusterer = TweetClusterer(
+        embedding_model=FakeEmbeddingModel(),
+        reducer=FakeReducer(),
+        clusterer=FakeClusterer(),
+        vectorizer_cls=FakeTfidfVectorizer,
+    )
+    df = pd.DataFrame({"tweet": ["Hello @u #AI!", "https://example.com @u #tag"]})
+
+    result = clusterer.prepare_tweets(df)
+
+    assert result["clean_tweet"].tolist() == ["hello"]
+
+
+def test_tweet_clusterer_compute_embeddings_uses_notebook_encode_options():
+    embedding_model = FakeEmbeddingModel()
+    clusterer = TweetClusterer(embedding_model=embedding_model)
+
+    embeddings = clusterer.compute_embeddings(["hello", "world"])
+
+    assert embeddings.tolist() == [[1.0, 0.0], [0.0, 1.0]]
+    assert embedding_model.calls[0]["kwargs"] == {
+        "batch_size": 64,
+        "show_progress_bar": True,
+        "convert_to_numpy": True,
+        "normalize_embeddings": True,
+    }
+
+
+def test_tweet_clusterer_build_cluster_labels_uses_lowest_idf_words_and_noise():
+    clusterer = TweetClusterer(vectorizer_cls=FakeTfidfVectorizer)
+    df = pd.DataFrame(
+        {
+            "clean_tweet": ["alpha beta", "beta delta", "noise"],
+            "cluster": [0, 0, -1],
+        }
+    )
+
+    labels = clusterer.build_cluster_labels(df)
+
+    assert labels == { -1: "Noise", 0: "Cluster 0: delta, beta, alpha, gamma" }
+
+
+def test_tweet_clusterer_fit_transform_adds_coordinates_clusters_and_labels():
+    clusterer = TweetClusterer(
+        embedding_model=FakeEmbeddingModel(),
+        reducer=FakeReducer(),
+        clusterer=FakeClusterer(),
+        vectorizer_cls=FakeTfidfVectorizer,
+    )
+    df = pd.DataFrame(
+        {
+            "tweet": [
+                "First cluster text",
+                "Second cluster text",
+                "Noise text",
+            ]
+        }
+    )
+
+    result = clusterer.fit_transform(df)
+
+    assert result["x"].tolist() == [0.0, 1.0, 2.0]
+    assert result["y"].tolist() == [0.0, 1.0, 2.0]
+    assert result["cluster"].tolist() == [0, 0, -1]
+    assert result["cluster_label"].tolist() == [
+        "Cluster 0: delta, beta, alpha, gamma",
+        "Cluster 0: delta, beta, alpha, gamma",
+        "Noise",
+    ]
+    assert clusterer.n_clusters_ == 1
+    assert clusterer.n_noise_ == 1

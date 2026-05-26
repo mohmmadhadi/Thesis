@@ -8,6 +8,7 @@ import string
 from collections import Counter
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
 
@@ -20,6 +21,14 @@ EMOJI_RE = re.compile(
     "\U000024C2-\U0001F251]+",
     flags=re.UNICODE,
 )
+
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_BATCH_SIZE = 64
+UMAP_N_NEIGHBORS = 15
+UMAP_MIN_DIST = 0.1
+UMAP_RANDOM_STATE = 42
+HDBSCAN_MIN_CLUSTER_SIZE_TWEETS = 20
+HDBSCAN_MIN_SAMPLES_TWEETS = 3
 
 
 class FeatureExtractor:
@@ -198,3 +207,140 @@ class FeatureExtractor:
             .fillna(0)
             .reset_index()
         )
+
+
+class TweetClusterer:
+    """Run notebook-style tweet embedding, UMAP reduction, and HDBSCAN clustering."""
+
+    def __init__(
+        self,
+        embedding_model_name: str = EMBEDDING_MODEL,
+        batch_size: int = EMBEDDING_BATCH_SIZE,
+        umap_n_neighbors: int = UMAP_N_NEIGHBORS,
+        umap_min_dist: float = UMAP_MIN_DIST,
+        hdbscan_min_cluster_size: int = HDBSCAN_MIN_CLUSTER_SIZE_TWEETS,
+        hdbscan_min_samples: int = HDBSCAN_MIN_SAMPLES_TWEETS,
+        embedding_model: Any | None = None,
+        reducer: Any | None = None,
+        clusterer: Any | None = None,
+        vectorizer_cls: Any | None = None,
+    ) -> None:
+        self.embedding_model_name = embedding_model_name
+        self.batch_size = batch_size
+        self.umap_n_neighbors = umap_n_neighbors
+        self.umap_min_dist = umap_min_dist
+        self.hdbscan_min_cluster_size = hdbscan_min_cluster_size
+        self.hdbscan_min_samples = hdbscan_min_samples
+        self.embedding_model = embedding_model
+        self.reducer = reducer
+        self.clusterer = clusterer
+        self.vectorizer_cls = vectorizer_cls
+        self.embeddings: np.ndarray | None = None
+        self.embeddings_2d: np.ndarray | None = None
+        self.cluster_labels_: dict[int, str] | None = None
+        self.n_clusters_: int | None = None
+        self.n_noise_: int | None = None
+
+    def _load_embedding_model(self) -> Any:
+        from sentence_transformers import SentenceTransformer
+
+        return SentenceTransformer(self.embedding_model_name)
+
+    def _build_reducer(self) -> Any:
+        import umap
+
+        return umap.UMAP(
+            n_neighbors=self.umap_n_neighbors,
+            n_components=2,
+            min_dist=self.umap_min_dist,
+            metric="cosine",
+            random_state=UMAP_RANDOM_STATE,
+        )
+
+    def _build_clusterer(self) -> Any:
+        import hdbscan
+
+        return hdbscan.HDBSCAN(
+            min_cluster_size=self.hdbscan_min_cluster_size,
+            min_samples=self.hdbscan_min_samples,
+            metric="euclidean",
+            cluster_selection_method="eom",
+        )
+
+    def prepare_tweets(self, df: pd.DataFrame, text_col: str = "tweet") -> pd.DataFrame:
+        """Add clean_tweet and drop rows empty after notebook cleaning."""
+        result = df.copy()
+        result["clean_tweet"] = result[text_col].apply(FeatureExtractor.clean_tweet)
+        return result[result["clean_tweet"].str.strip() != ""].reset_index(drop=True)
+
+    def compute_embeddings(self, texts: list[str]) -> np.ndarray:
+        """Encode cleaned tweets with normalized sentence embeddings."""
+        if self.embedding_model is None:
+            self.embedding_model = self._load_embedding_model()
+        embeddings = self.embedding_model.encode(
+            texts,
+            batch_size=self.batch_size,
+            show_progress_bar=True,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        self.embeddings = np.asarray(embeddings)
+        return self.embeddings
+
+    def reduce_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
+        """Project embeddings to 2D with notebook UMAP settings."""
+        if self.reducer is None:
+            self.reducer = self._build_reducer()
+        reduced = self.reducer.fit_transform(embeddings)
+        self.embeddings_2d = np.asarray(reduced)
+        return self.embeddings_2d
+
+    def cluster_embeddings(self, embeddings_2d: np.ndarray) -> np.ndarray:
+        """Cluster 2D embeddings with notebook HDBSCAN settings."""
+        if self.clusterer is None:
+            self.clusterer = self._build_clusterer()
+        return np.asarray(self.clusterer.fit_predict(embeddings_2d))
+
+    def build_cluster_labels(
+        self,
+        df: pd.DataFrame,
+        cluster_col: str = "cluster",
+        text_col: str = "clean_tweet",
+    ) -> dict[int, str]:
+        """Build TF-IDF labels using lowest-IDF words per cluster."""
+        if self.vectorizer_cls is None:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+
+            self.vectorizer_cls = TfidfVectorizer
+
+        labels: dict[int, str] = {}
+        for cluster_id in sorted(df[cluster_col].unique()):
+            if cluster_id == -1:
+                labels[int(cluster_id)] = "Noise"
+                continue
+            cluster_tweets = df[df[cluster_col] == cluster_id][text_col].tolist()
+            tfidf = self.vectorizer_cls(max_features=200, stop_words="english")
+            tfidf.fit(cluster_tweets)
+            scores = dict(zip(tfidf.get_feature_names_out(), tfidf.idf_))
+            top_words = sorted(scores, key=scores.get)[:4]
+            labels[int(cluster_id)] = f"Cluster {cluster_id}: {', '.join(top_words)}"
+        self.cluster_labels_ = labels
+        return labels
+
+    def fit_transform(self, df: pd.DataFrame, text_col: str = "tweet") -> pd.DataFrame:
+        """Return tweets with clean text, UMAP coordinates, clusters, and labels."""
+        result = self.prepare_tweets(df, text_col=text_col)
+        embeddings = self.compute_embeddings(result["clean_tweet"].tolist())
+        embeddings_2d = self.reduce_embeddings(embeddings)
+        result["x"] = embeddings_2d[:, 0]
+        result["y"] = embeddings_2d[:, 1]
+        result["cluster"] = self.cluster_embeddings(embeddings_2d)
+
+        self.n_clusters_ = result["cluster"].nunique() - (
+            1 if -1 in result["cluster"].values else 0
+        )
+        self.n_noise_ = int((result["cluster"] == -1).sum())
+
+        labels = self.build_cluster_labels(result)
+        result["cluster_label"] = result["cluster"].map(labels)
+        return result
