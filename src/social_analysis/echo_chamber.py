@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MinMaxScaler
+from scipy.stats import entropy
 
 
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
@@ -422,3 +423,187 @@ class InteractionNetworkBuilder:
         """Return directed and undirected notebook-compatible interaction graphs."""
         graph = self.build_graph(df, user_attitudes)
         return graph, self.to_undirected(graph)
+
+
+class EchoChamberAnalyzer:
+    """Compute echo-chamber metrics from attitudes and an interaction graph."""
+
+    @staticmethod
+    def measure_polarization(attitudes: dict[Any, float]) -> dict[str, float]:
+        """Measure variance, bimodality, and inter-group attitude distance."""
+        attitudes_array = np.array(list(attitudes.values()))
+        n = len(attitudes_array)
+        if n == 0:
+            return {"variance": 0, "bimodality": 0, "inter_group_distance": 0}
+
+        variance = np.var(attitudes_array)
+
+        from scipy.stats import kurtosis, skew
+
+        sk = skew(attitudes_array)
+        kurt = kurtosis(attitudes_array)
+        bimodality = (
+            (sk**2 + 1) / (kurt + 3 * (n - 1) ** 2 / ((n - 2) * (n - 3)))
+            if n > 3
+            else 0
+        )
+
+        pos = attitudes_array[attitudes_array > 0]
+        neg = attitudes_array[attitudes_array < 0]
+        inter_group_distance = np.mean(pos) - np.mean(neg) if len(pos) > 0 and len(neg) > 0 else 0
+
+        return {
+            "variance": float(variance),
+            "bimodality": float(bimodality),
+            "inter_group_distance": float(inter_group_distance),
+        }
+
+    @staticmethod
+    def measure_homophily(graph: nx.Graph, attitudes: dict[Any, float]) -> dict[str, float]:
+        """Measure network assortativity and same-sign edge ratio."""
+        if graph.number_of_edges() == 0:
+            return {"assortativity": 0, "homophily_ratio": 0}
+
+        valid_attitudes = {node: attitudes[node] for node in graph.nodes() if node in attitudes}
+        nx.set_node_attributes(graph, valid_attitudes, "attitude")
+
+        try:
+            assortativity = nx.numeric_assortativity_coefficient(graph, "attitude")
+        except Exception:
+            assortativity = 0
+
+        similar, total = 0, 0
+        for source, target in graph.edges():
+            if source in valid_attitudes and target in valid_attitudes:
+                if valid_attitudes[source] * valid_attitudes[target] > 0:
+                    similar += 1
+                total += 1
+        return {
+            "assortativity": float(assortativity),
+            "homophily_ratio": float(similar / total if total > 0 else 0),
+        }
+
+    @staticmethod
+    def calculate_exposure_diversity(
+        graph: nx.Graph,
+        attitudes: dict[Any, float],
+    ) -> dict[Any, float]:
+        """Calculate exposure diversity score for each graph node."""
+        diversity_scores: dict[Any, float] = {}
+
+        for node in graph.nodes():
+            neighbors = list(graph.neighbors(node))
+            if len(neighbors) == 0:
+                diversity_scores[node] = 0
+                continue
+
+            neighbor_attitudes = [attitudes[neighbor] for neighbor in neighbors if neighbor in attitudes]
+            if len(neighbor_attitudes) == 0:
+                diversity_scores[node] = 0
+                continue
+
+            std_diversity = np.std(neighbor_attitudes)
+            bins = np.array([-1, -0.5, 0, 0.5, 1])
+            hist, _ = np.histogram(neighbor_attitudes, bins=bins)
+            probs = hist / hist.sum() if hist.sum() > 0 else hist
+            entropy_diversity = entropy(probs + 1e-10)
+            range_diversity = np.max(neighbor_attitudes) - np.min(neighbor_attitudes)
+
+            diversity_scores[node] = float(
+                (std_diversity + entropy_diversity / 2 + range_diversity) / 3
+            )
+
+        return diversity_scores
+
+    @staticmethod
+    def detect_communities(graph: nx.Graph) -> dict[Any, int]:
+        """Detect communities with Louvain, matching notebook behavior."""
+        if graph.number_of_edges() == 0:
+            return {node: 0 for node in graph.nodes()}
+
+        import community as community_louvain
+
+        return community_louvain.best_partition(graph)
+
+    @staticmethod
+    def compute_modularity(communities: dict[Any, int], graph: nx.Graph) -> float:
+        """Compute Louvain modularity for a community assignment."""
+        import community as community_louvain
+
+        return float(community_louvain.modularity(communities, graph))
+
+    @staticmethod
+    def add_community_labels(
+        user_attitudes: pd.DataFrame,
+        communities: dict[Any, int],
+        user_col: str = "user_id",
+    ) -> pd.DataFrame:
+        """Add community labels to user attitude rows."""
+        result = user_attitudes.copy()
+        result["community"] = result[user_col].map(communities)
+        return result
+
+    @staticmethod
+    def compute_community_stats(user_attitudes: pd.DataFrame) -> pd.DataFrame:
+        """Compute notebook community statistics sorted by size."""
+        community_stats = user_attitudes.groupby("community").agg(
+            {
+                "user_id": "count",
+                "propagated_attitude": ["mean", "std"],
+                "exposure_diversity": "mean",
+            }
+        ).round(4)
+
+        community_stats.columns = ["size", "avg_attitude", "attitude_std", "avg_diversity"]
+        return community_stats.sort_values("size", ascending=False)
+
+    @staticmethod
+    def compute_echo_chamber_score(
+        polarization: dict[str, float],
+        homophily: dict[str, float],
+        diversity_stats: pd.Series,
+        community_stats: pd.DataFrame,
+    ) -> dict[str, float]:
+        """Compute the notebook's final echo chamber component scores."""
+        polarization_score = min(
+            1.0,
+            (
+                0.4 * min(1.0, polarization["variance"] / 0.5)
+                + 0.3 * min(1.0, polarization["bimodality"] / 0.7)
+                + 0.3 * min(1.0, abs(polarization["inter_group_distance"]) / 1.5)
+            ),
+        )
+
+        homophily_score = min(
+            1.0,
+            (
+                0.5 * max(0, homophily["assortativity"])
+                + 0.5 * homophily["homophily_ratio"]
+            ),
+        )
+
+        avg_diversity = diversity_stats.mean()
+        diversity_score = max(0, 1 - avg_diversity)
+
+        between_community_var = community_stats["avg_attitude"].var()
+        within_community_var = community_stats["attitude_std"].mean()
+
+        if within_community_var > 0:
+            separation_score = min(1.0, between_community_var / (within_community_var + 0.1))
+        else:
+            separation_score = 0
+
+        echo_chamber_score = (
+            0.3 * polarization_score
+            + 0.3 * homophily_score
+            + 0.2 * diversity_score
+            + 0.2 * separation_score
+        )
+
+        return {
+            "overall_score": float(echo_chamber_score),
+            "polarization_score": float(polarization_score),
+            "homophily_score": float(homophily_score),
+            "diversity_score": float(diversity_score),
+            "separation_score": float(separation_score),
+        }

@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,6 +13,7 @@ from social_analysis.echo_chamber import (
     ANTI_ANCHORS,
     PRO_ANCHORS,
     AttitudeScorer,
+    EchoChamberAnalyzer,
     InteractionNetworkBuilder,
     StanceEstimator,
 )
@@ -333,3 +335,126 @@ def test_interaction_network_builder_returns_undirected_graph_and_stats():
     assert stats["number_of_edges"] == 1
     assert stats["number_of_connected_components"] == 1
     assert stats["average_degree"] == pytest.approx(1.0)
+
+
+def test_echo_chamber_analyzer_measure_polarization_matches_formula():
+    attitudes = {1: -0.5, 2: 0.5, 3: 0.2, 4: -0.2}
+
+    result = EchoChamberAnalyzer.measure_polarization(attitudes)
+
+    assert result["variance"] == pytest.approx(np.var([-0.5, 0.5, 0.2, -0.2]))
+    assert result["inter_group_distance"] == pytest.approx(np.mean([0.5, 0.2]) - np.mean([-0.5, -0.2]))
+    assert "bimodality" in result
+
+
+def test_echo_chamber_analyzer_measure_polarization_empty_returns_zeroes():
+    assert EchoChamberAnalyzer.measure_polarization({}) == {
+        "variance": 0,
+        "bimodality": 0,
+        "inter_group_distance": 0,
+    }
+
+
+def test_echo_chamber_analyzer_measure_homophily_counts_same_sign_edges():
+    graph = nx.Graph()
+    graph.add_edges_from([(1, 2), (2, 3), (3, 4)])
+    attitudes = {1: 0.5, 2: 0.2, 3: -0.1, 4: -0.4}
+
+    result = EchoChamberAnalyzer.measure_homophily(graph, attitudes)
+
+    assert result["homophily_ratio"] == pytest.approx(2 / 3)
+    assert "assortativity" in result
+    assert graph.nodes[1]["attitude"] == 0.5
+
+
+def test_echo_chamber_analyzer_measure_homophily_no_edges_returns_zeroes():
+    graph = nx.Graph()
+    graph.add_nodes_from([1, 2])
+
+    assert EchoChamberAnalyzer.measure_homophily(graph, {1: 0.1, 2: -0.1}) == {
+        "assortativity": 0,
+        "homophily_ratio": 0,
+    }
+
+
+def test_echo_chamber_analyzer_calculate_exposure_diversity_matches_formula():
+    graph = nx.Graph()
+    graph.add_edges_from([(1, 2), (1, 3)])
+    graph.add_node(4)
+    attitudes = {2: -0.5, 3: 0.5}
+
+    result = EchoChamberAnalyzer.calculate_exposure_diversity(graph, attitudes)
+
+    neighbor_attitudes = np.array([-0.5, 0.5])
+    hist, _ = np.histogram(neighbor_attitudes, bins=np.array([-1, -0.5, 0, 0.5, 1]))
+    probs = hist / hist.sum()
+    from scipy.stats import entropy
+
+    expected = (
+        np.std(neighbor_attitudes)
+        + entropy(probs + 1e-10) / 2
+        + (np.max(neighbor_attitudes) - np.min(neighbor_attitudes))
+    ) / 3
+    assert result[1] == pytest.approx(expected)
+    assert result[4] == 0
+
+
+def test_echo_chamber_analyzer_detect_communities_no_edges_assigns_zero():
+    graph = nx.Graph()
+    graph.add_nodes_from([1, 2])
+
+    assert EchoChamberAnalyzer.detect_communities(graph) == {1: 0, 2: 0}
+
+
+def test_echo_chamber_analyzer_add_labels_and_community_stats_match_notebook_columns():
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3],
+            "propagated_attitude": [0.5, 0.7, -0.4],
+            "exposure_diversity": [0.1, 0.3, 0.8],
+        }
+    )
+
+    labeled = EchoChamberAnalyzer.add_community_labels(user_attitudes, {1: 0, 2: 0, 3: 1})
+    stats = EchoChamberAnalyzer.compute_community_stats(labeled)
+
+    assert labeled["community"].tolist() == [0, 0, 1]
+    assert stats.columns.tolist() == ["size", "avg_attitude", "attitude_std", "avg_diversity"]
+    assert stats.loc[0, "size"] == 2
+    assert stats.loc[0, "avg_attitude"] == pytest.approx(0.6)
+    assert stats.index.tolist()[0] == 0
+
+
+def test_echo_chamber_analyzer_compute_echo_chamber_score_matches_notebook_weights():
+    polarization = {"variance": 0.25, "bimodality": 0.35, "inter_group_distance": 0.75}
+    homophily = {"assortativity": 0.4, "homophily_ratio": 0.6}
+    diversity = pd.Series([0.2, 0.4])
+    community_stats = pd.DataFrame(
+        {
+            "avg_attitude": [0.5, -0.5],
+            "attitude_std": [0.2, 0.2],
+        }
+    )
+
+    result = EchoChamberAnalyzer.compute_echo_chamber_score(
+        polarization,
+        homophily,
+        diversity,
+        community_stats,
+    )
+
+    polarization_score = 0.4 * 0.5 + 0.3 * 0.5 + 0.3 * 0.5
+    homophily_score = 0.5 * 0.4 + 0.5 * 0.6
+    diversity_score = 1 - diversity.mean()
+    separation_score = min(1.0, community_stats["avg_attitude"].var() / (community_stats["attitude_std"].mean() + 0.1))
+    expected = (
+        0.3 * polarization_score
+        + 0.3 * homophily_score
+        + 0.2 * diversity_score
+        + 0.2 * separation_score
+    )
+    assert result["overall_score"] == pytest.approx(expected)
+    assert result["polarization_score"] == pytest.approx(polarization_score)
+    assert result["homophily_score"] == pytest.approx(homophily_score)
+    assert result["diversity_score"] == pytest.approx(diversity_score)
+    assert result["separation_score"] == pytest.approx(separation_score)
