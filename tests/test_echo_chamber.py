@@ -14,6 +14,7 @@ from social_analysis.echo_chamber import (
     PRO_ANCHORS,
     AttitudeScorer,
     EchoChamberAnalyzer,
+    EchoChamberPipeline,
     InteractionNetworkBuilder,
     StanceEstimator,
 )
@@ -50,6 +51,72 @@ class FakeCrossEncoder:
             else:
                 scores.append(0.3 if text == "pro" else 0.7)
         return np.array(scores)
+
+
+class FakeEchoChamberAnalyzer:
+    def measure_polarization(self, attitudes):
+        return {"variance": 0.1, "bimodality": 0.2, "inter_group_distance": 0.3}
+
+    def measure_homophily(self, graph, attitudes):
+        return {"assortativity": 0.4, "homophily_ratio": 0.5}
+
+    def calculate_exposure_diversity(self, graph, attitudes):
+        return {node: 0.25 for node in graph.nodes()}
+
+    def detect_communities(self, graph):
+        return {node: index for index, node in enumerate(graph.nodes())}
+
+    def compute_modularity(self, communities, graph):
+        return 0.42
+
+    def add_community_labels(self, user_attitudes, communities, user_col="user_id"):
+        return EchoChamberAnalyzer.add_community_labels(
+            user_attitudes,
+            communities,
+            user_col=user_col,
+        )
+
+    def compute_community_stats(self, user_attitudes):
+        return pd.DataFrame(
+            {
+                "size": [1, 1],
+                "avg_attitude": [0.2, -0.2],
+                "attitude_std": [0.1, 0.1],
+                "avg_diversity": [0.25, 0.25],
+            },
+            index=[0, 1],
+        )
+
+    def compute_echo_chamber_score(
+        self,
+        polarization,
+        homophily,
+        diversity_stats,
+        community_stats,
+    ):
+        return {
+            "overall_score": 0.6,
+            "polarization_score": 0.1,
+            "homophily_score": 0.2,
+            "diversity_score": 0.3,
+            "separation_score": 0.4,
+        }
+
+
+class ExplodingStanceEstimator:
+    def transform_dataframe(self, *args, **kwargs):
+        raise AssertionError("Stance estimator should not be called")
+
+
+class AddingStanceEstimator:
+    def __init__(self):
+        self.called = False
+
+    def transform_dataframe(self, df, text_col="clean_text", initial_score_col="roberta_compound"):
+        self.called = True
+        result = df.copy()
+        result["stance_ensemble"] = result[initial_score_col]
+        return result
 
 
 def test_build_stance_prototypes_uses_notebook_thresholds():
@@ -458,3 +525,67 @@ def test_echo_chamber_analyzer_compute_echo_chamber_score_matches_notebook_weigh
     assert result["homophily_score"] == pytest.approx(homophily_score)
     assert result["diversity_score"] == pytest.approx(diversity_score)
     assert result["separation_score"] == pytest.approx(separation_score)
+
+
+def test_echo_chamber_pipeline_orchestrates_existing_stance_columns():
+    df = pd.DataFrame(
+        {
+            "id": [10, 11, 12],
+            "user_id": [1, 2, 1],
+            "day": [1, 1, 2],
+            "clean_text": ["a", "b", "c"],
+            "roberta_compound": [0.2, -0.4, 0.6],
+            "stance_ensemble": [0.5, -0.5, 0.25],
+            "like": [1, 2, 3],
+            "reaction_count": [2, 3, 4],
+            "comment_to": [-1, 10, -1],
+            "shared_from": [-1, -1, 11],
+        }
+    )
+    pipeline = EchoChamberPipeline(
+        stance_estimator=ExplodingStanceEstimator(),
+        analyzer=FakeEchoChamberAnalyzer(),
+    )
+
+    result = pipeline.run(df)
+
+    assert result["tweets"]["sentiment_score"].tolist() == [0.2, -0.4, 0.6]
+    assert "attitude_score" in result["tweets"].columns
+    assert result["final_day"] == 2
+    expected_user_one = result["tweets"][result["tweets"]["user_id"] == 1][
+        "attitude_score"
+    ].mean()
+    assert result["propagated_attitudes"][1] == pytest.approx(expected_user_one)
+    assert result["graph"].has_edge(2, 1)
+    assert result["graph"].has_edge(1, 2)
+    assert result["user_attitudes"]["propagated_attitude"].notna().all()
+    assert result["user_attitudes"]["exposure_diversity"].tolist() == [0.25, 0.25]
+    assert result["modularity"] == 0.42
+    assert result["echo_chamber_metrics"]["overall_score"] == 0.6
+
+
+def test_echo_chamber_pipeline_runs_stance_estimation_when_required():
+    df = pd.DataFrame(
+        {
+            "id": [10, 11],
+            "user_id": [1, 2],
+            "day": [1, 1],
+            "clean_text": ["a", "b"],
+            "roberta_compound": [0.2, -0.4],
+            "like": [1, 2],
+            "reaction_count": [2, 3],
+            "comment_to": [-1, 10],
+            "shared_from": [-1, -1],
+        }
+    )
+    stance_estimator = AddingStanceEstimator()
+    pipeline = EchoChamberPipeline(
+        stance_estimator=stance_estimator,
+        analyzer=FakeEchoChamberAnalyzer(),
+    )
+
+    result = pipeline.run(df)
+
+    assert stance_estimator.called
+    assert result["tweets"]["stance_ensemble"].tolist() == [0.2, -0.4]
+    assert "echo_chamber_metrics" in result

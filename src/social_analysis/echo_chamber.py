@@ -607,3 +607,159 @@ class EchoChamberAnalyzer:
             "diversity_score": float(diversity_score),
             "separation_score": float(separation_score),
         }
+
+
+class EchoChamberPipeline:
+    """Coordinate the extracted echo-chamber analysis components."""
+
+    def __init__(
+        self,
+        config: Any | None = None,
+        stance_estimator: StanceEstimator | None = None,
+        attitude_scorer: AttitudeScorer | None = None,
+        network_builder: InteractionNetworkBuilder | None = None,
+        analyzer: EchoChamberAnalyzer | None = None,
+    ) -> None:
+        self.config = config
+        self.stance_estimator = stance_estimator
+        self.attitude_scorer = attitude_scorer or AttitudeScorer()
+        self.network_builder = network_builder or InteractionNetworkBuilder()
+        self.analyzer = analyzer or EchoChamberAnalyzer()
+
+    @staticmethod
+    def analyze_real_propagation(
+        dataframe: pd.DataFrame,
+        user_col: str = "user_id",
+        day_col: str = "day",
+        attitude_col: str = "attitude_score",
+    ) -> dict[Any, dict[Any, float]]:
+        """Build the notebook's cumulative daily user-attitude snapshots."""
+        days = sorted(dataframe[day_col].unique())
+        real_propagation_history = {}
+
+        for day in days:
+            day_df = dataframe[dataframe[day_col] <= day]
+            day_attitudes = day_df.groupby(user_col)[attitude_col].mean().to_dict()
+            real_propagation_history[day] = day_attitudes
+
+        return real_propagation_history
+
+    @staticmethod
+    def _final_propagated_attitudes(
+        propagation_history: dict[Any, dict[Any, float]],
+    ) -> tuple[Any | None, dict[Any, float]]:
+        if not propagation_history:
+            return None, {}
+        final_day = max(propagation_history.keys())
+        return final_day, propagation_history[final_day]
+
+    def _ensure_stance_columns(
+        self,
+        df: pd.DataFrame,
+        text_col: str,
+        initial_score_col: str,
+        stance_col: str,
+    ) -> pd.DataFrame:
+        if stance_col in df.columns:
+            return df.copy()
+
+        estimator = self.stance_estimator or StanceEstimator()
+        return estimator.transform_dataframe(
+            df,
+            text_col=text_col,
+            initial_score_col=initial_score_col,
+        )
+
+    def run(
+        self,
+        df: pd.DataFrame,
+        text_col: str = "clean_text",
+        user_col: str = "user_id",
+        day_col: str = "day",
+        initial_score_col: str = "roberta_compound",
+        sentiment_col: str = "roberta_compound",
+        stance_col: str = "stance_ensemble",
+    ) -> dict[str, Any]:
+        """Run the notebook-compatible echo-chamber workflow."""
+        tweet_df = self._ensure_stance_columns(
+            df,
+            text_col=text_col,
+            initial_score_col=initial_score_col,
+            stance_col=stance_col,
+        )
+        tweet_df = self.attitude_scorer.transform_dataframe(
+            tweet_df,
+            sentiment_col=sentiment_col,
+            stance_col=stance_col,
+        )
+
+        user_attitudes = self.attitude_scorer.compute_user_attitudes(
+            tweet_df,
+            user_col=user_col,
+        )
+        graph = self.network_builder.build_graph(tweet_df, user_attitudes)
+        graph_undirected = self.network_builder.to_undirected(graph)
+        graph_stats = self.network_builder.graph_stats(graph)
+
+        propagation_history = self.analyze_real_propagation(
+            tweet_df,
+            user_col=user_col,
+            day_col=day_col,
+            attitude_col="attitude_score",
+        )
+        final_day, propagated_attitudes = self._final_propagated_attitudes(
+            propagation_history
+        )
+        user_attitudes["propagated_attitude"] = user_attitudes[user_col].map(
+            propagated_attitudes
+        )
+
+        polarization = self.analyzer.measure_polarization(propagated_attitudes)
+        homophily = self.analyzer.measure_homophily(
+            graph_undirected,
+            propagated_attitudes,
+        )
+        diversity_scores = self.analyzer.calculate_exposure_diversity(
+            graph_undirected,
+            propagated_attitudes,
+        )
+        user_attitudes["exposure_diversity"] = user_attitudes[user_col].map(
+            diversity_scores
+        )
+
+        communities = self.analyzer.detect_communities(graph_undirected)
+        modularity = (
+            self.analyzer.compute_modularity(communities, graph_undirected)
+            if graph_undirected.number_of_edges() > 0
+            else 0
+        )
+        user_attitudes = self.analyzer.add_community_labels(
+            user_attitudes,
+            communities,
+            user_col=user_col,
+        )
+        community_stats = self.analyzer.compute_community_stats(user_attitudes)
+        echo_chamber_metrics = self.analyzer.compute_echo_chamber_score(
+            polarization,
+            homophily,
+            user_attitudes["exposure_diversity"].dropna(),
+            community_stats,
+        )
+
+        return {
+            "tweets": tweet_df,
+            "user_attitudes": user_attitudes,
+            "graph": graph,
+            "graph_undirected": graph_undirected,
+            "graph_stats": graph_stats,
+            "propagation_history": propagation_history,
+            "final_day": final_day,
+            "propagated_attitudes": propagated_attitudes,
+            "polarization": polarization,
+            "homophily": homophily,
+            "diversity_scores": diversity_scores,
+            "communities": communities,
+            "modularity": modularity,
+            "community_stats": community_stats,
+            "echo_chamber_metrics": echo_chamber_metrics,
+        }
