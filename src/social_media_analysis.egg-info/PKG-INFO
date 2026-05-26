@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: social-media-analysis
+Version: 0.1.0
+Summary: OOP refactor of a notebook-based social media analysis project
+Requires-Python: <3.12,>=3.10

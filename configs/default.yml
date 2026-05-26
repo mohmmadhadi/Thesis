@@ -1,0 +1,33 @@
+paths:
+  raw_data: data/raw/
+  processed_data: data/processed/
+  outputs: data/outputs/
+
+columns:
+  text: tweet
+  user_id: user_id
+  thread_id: thread_id
+  parent_id: parent_id
+  timestamp: created_at
+
+models:
+  sentence_transformer: all-MiniLM-L6-v2
+  cross_encoder: cross-encoder/stsb-roberta-large
+  sentiment_model: cardiffnlp/twitter-roberta-base-sentiment-latest
+  emotion_model: j-hartmann/emotion-english-distilroberta-base
+
+coherence:
+  low_threshold: 0.35
+
+conversation:
+  changepoint_penalty: 5
+
+topic_modeling:
+  num_topics: 10
+  random_state: 42
+
+clustering:
+  random_state: 42
+
+echo_chamber:
+  polarization_threshold: 0.5
