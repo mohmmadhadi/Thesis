@@ -21,3 +21,11 @@ umap-learn
 hdbscan
 networkx
 plotly
+
+ruptures
+bertopic
+gensim
+pyLDAvis
+textstat
+diptest
+python-louvain

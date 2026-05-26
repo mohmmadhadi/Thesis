@@ -2,17 +2,23 @@ paths:
   raw_data: data/raw/
   processed_data: data/processed/
   outputs: data/outputs/
+  reference_outputs: reference_outputs/
 
 columns:
+  id: id
   text: tweet
   user_id: user_id
   thread_id: thread_id
-  parent_id: parent_id
-  timestamp: created_at
+  parent_id: comment_to
+  comment_to: comment_to
+  round: round
+  day: day
+  hour: hour
+  reaction_count: reaction_count
 
 models:
-  sentence_transformer: all-MiniLM-L6-v2
-  cross_encoder: cross-encoder/stsb-roberta-large
+  sentence_transformer: sentence-transformers/all-MiniLM-L6-v2
+  cross_encoder: cross-encoder/stsb-roberta-base
   sentiment_model: cardiffnlp/twitter-roberta-base-sentiment-latest
   emotion_model: j-hartmann/emotion-english-distilroberta-base
 
@@ -23,7 +29,7 @@ conversation:
   changepoint_penalty: 5
 
 topic_modeling:
-  num_topics: 10
+  lda_num_topics: 8
   random_state: 42
 
 clustering:

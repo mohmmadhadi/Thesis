@@ -34,3 +34,15 @@ reference_outputs/
 Thumbs.db
 .vscode/
 .idea/
+
+*.egg-info/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+data/raw/
+data/processed/
+data/outputs/
+reference_outputs/
