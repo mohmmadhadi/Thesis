@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 EMOJI_RE = re.compile(
@@ -29,6 +30,19 @@ UMAP_MIN_DIST = 0.1
 UMAP_RANDOM_STATE = 42
 HDBSCAN_MIN_CLUSTER_SIZE_TWEETS = 20
 HDBSCAN_MIN_SAMPLES_TWEETS = 3
+PCA_VARIANCE_THRESHOLD = 0.80
+GMM_N_COMPONENTS = 4
+HDBSCAN_MIN_CLUSTER_SIZE_AGENTS = 6
+HDBSCAN_MIN_SAMPLES_AGENTS = 2
+CLUSTER_FEATURES = [
+    "mean_sent",
+    "std_emo",
+    "mtld",
+    "pronoun_ratio",
+    "mean_emoji_rate",
+    "avg_reply_coherence",
+    "has_parent",
+]
 
 
 class FeatureExtractor:
@@ -344,3 +358,335 @@ class TweetClusterer:
         labels = self.build_cluster_labels(result)
         result["cluster_label"] = result["cluster"].map(labels)
         return result
+
+
+class UserClusterer:
+    """Build agent feature matrices and run notebook-style user clustering."""
+
+    def __init__(
+        self,
+        pca_variance_threshold: float = PCA_VARIANCE_THRESHOLD,
+        gmm_n_components: int = GMM_N_COMPONENTS,
+        hdbscan_min_cluster_size: int = HDBSCAN_MIN_CLUSTER_SIZE_AGENTS,
+        hdbscan_min_samples: int = HDBSCAN_MIN_SAMPLES_AGENTS,
+        cluster_features: list[str] | None = None,
+        feature_extractor: FeatureExtractor | None = None,
+        scaler: Any | None = None,
+        pca: Any | None = None,
+        pca_vis: Any | None = None,
+        gmm: Any | None = None,
+        hdbscan_clusterer: Any | None = None,
+    ) -> None:
+        self.pca_variance_threshold = pca_variance_threshold
+        self.gmm_n_components = gmm_n_components
+        self.hdbscan_min_cluster_size = hdbscan_min_cluster_size
+        self.hdbscan_min_samples = hdbscan_min_samples
+        self.cluster_features = cluster_features or CLUSTER_FEATURES
+        self.feature_extractor = feature_extractor or FeatureExtractor()
+        self.scaler = scaler
+        self.pca = pca
+        self.pca_vis = pca_vis
+        self.gmm = gmm
+        self.hdbscan_clusterer = hdbscan_clusterer
+        self.selected_features_: list[str] | None = None
+        self.agents_cluster_df_: pd.DataFrame | None = None
+        self.x_scaled_: np.ndarray | None = None
+        self.x_pca_: np.ndarray | None = None
+        self.x_2d_: np.ndarray | None = None
+        self.labels_gmm_: np.ndarray | None = None
+        self.labels_hdbscan_: np.ndarray | None = None
+
+    @staticmethod
+    def initialize_agents(user_info: pd.DataFrame) -> pd.DataFrame:
+        """Copy user demographic/personality rows as the agent base table."""
+        return user_info.copy()
+
+    @staticmethod
+    def add_length_features(
+        agents: pd.DataFrame,
+        tweets: pd.DataFrame,
+        text_col: str = "tweet",
+    ) -> pd.DataFrame:
+        """Merge mean and std tweet length per user."""
+        tweet_data = tweets.copy()
+        tweet_data["length"] = tweet_data[text_col].apply(len)
+        len_stats = (
+            tweet_data.groupby("user_id")["length"]
+            .agg(mean_len="mean", std_len="std")
+            .fillna(0)
+            .reset_index()
+        )
+        return (
+            agents.merge(len_stats, left_on="id", right_on="user_id", how="left")
+            .drop(columns="user_id", errors="ignore")
+        )
+
+    @staticmethod
+    def add_sentiment_features(
+        agents: pd.DataFrame,
+        sentiments: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Merge notebook sentiment and emotion score aggregates per user."""
+        sent_stats = (
+            sentiments.groupby("user_id")
+            .agg(
+                mean_sent=("roberta_score", "mean"),
+                std_sent=("roberta_score", "std"),
+                mean_emo=("emotion_score", "mean"),
+                std_emo=("emotion_score", "std"),
+            )
+            .fillna(0)
+            .reset_index()
+        )
+        result = (
+            agents.merge(sent_stats, left_on="id", right_on="user_id", how="left")
+            .drop(columns="user_id", errors="ignore")
+        )
+        result[["mean_sent", "std_sent", "mean_emo", "std_emo"]] = result[
+            ["mean_sent", "std_sent", "mean_emo", "std_emo"]
+        ].fillna(0)
+        return result
+
+    def add_text_feature_aggregates(
+        self,
+        agents: pd.DataFrame,
+        tweets: pd.DataFrame,
+        text_col: str = "tweet",
+    ) -> pd.DataFrame:
+        """Merge lexical diversity and LIWC-style user averages."""
+        user_text = tweets.groupby("user_id")[text_col].apply(" ".join)
+        diversity_feats = (
+            user_text.apply(self.feature_extractor.lexical_features)
+            .apply(pd.Series)
+            .reset_index()
+        )
+
+        liwc_raw = tweets[text_col].apply(self.feature_extractor.liwc_features)
+        liwc_df = pd.concat([tweets[["user_id"]], liwc_raw], axis=1)
+        user_fp = liwc_df.groupby("user_id").mean().reset_index()
+        user_fp = user_fp.merge(diversity_feats, on="user_id", how="left")
+
+        return (
+            agents.merge(user_fp, left_on="id", right_on="user_id", how="left")
+            .drop(columns="user_id", errors="ignore")
+        )
+
+    @staticmethod
+    def compute_user_tweet_cosine(
+        tweets: pd.DataFrame,
+        embeddings: np.ndarray,
+    ) -> pd.DataFrame:
+        """Compute mean pairwise tweet cosine similarity per user."""
+        agent_cosine: dict[Any, float] = {}
+        for user_id in tweets["user_id"].unique():
+            idx = tweets[tweets["user_id"] == user_id].index.tolist()
+            user_embeddings = embeddings[idx]
+            if len(user_embeddings) > 1:
+                sim_mat = cosine_similarity(user_embeddings)
+                upper = np.triu_indices(len(user_embeddings), k=1)
+                agent_cosine[user_id] = float(np.mean(sim_mat[upper]))
+            else:
+                agent_cosine[user_id] = 1.0 if len(user_embeddings) == 1 else 0.0
+        return pd.DataFrame(
+            agent_cosine.items(),
+            columns=["id", "avg_tweet_cosine_similarity"],
+        )
+
+    @staticmethod
+    def add_user_tweet_cosine(
+        agents: pd.DataFrame,
+        tweets: pd.DataFrame,
+        embeddings: np.ndarray,
+    ) -> pd.DataFrame:
+        """Merge per-user average tweet cosine similarity."""
+        cosine_df = UserClusterer.compute_user_tweet_cosine(tweets, embeddings)
+        result = agents.merge(cosine_df, on="id", how="left")
+        result["avg_tweet_cosine_similarity"] = result[
+            "avg_tweet_cosine_similarity"
+        ].fillna(0)
+        return result
+
+    def add_rate_features(
+        self,
+        agents: pd.DataFrame,
+        tweets: pd.DataFrame,
+        text_col: str = "tweet",
+    ) -> pd.DataFrame:
+        """Merge mean emoji and punctuation rates per user."""
+        tweet_data = tweets.copy()
+        tweet_data["emoji_rate"] = tweet_data[text_col].apply(self.feature_extractor.emoji_rate)
+        tweet_data["punctuation_rate"] = tweet_data[text_col].apply(
+            self.feature_extractor.punctuation_rate
+        )
+        rate_stats = self.feature_extractor.aggregate_user_rates(tweet_data)
+        return (
+            agents.merge(rate_stats, left_on="id", right_on="user_id", how="left")
+            .drop(columns="user_id", errors="ignore")
+        )
+
+    @staticmethod
+    def add_reply_coherence(
+        agents: pd.DataFrame,
+        reply_sim: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Merge weighted average reply coherence and missingness indicator."""
+        reply_data = reply_sim.copy()
+        reply_data["coherence_score"] = (
+            0.20 * reply_data["cosine_similarity"]
+            + 0.35 * reply_data["bs_f1"]
+            + 0.45 * reply_data["cross_encoder_score"]
+        )
+        avg_coh = (
+            reply_data.groupby("user_id")["coherence_score"]
+            .mean()
+            .reset_index()
+            .rename(columns={"coherence_score": "avg_reply_coherence"})
+        )
+        result = (
+            agents.merge(avg_coh, left_on="id", right_on="user_id", how="left")
+            .drop(columns="user_id", errors="ignore")
+        )
+        result["has_parent"] = result["avg_reply_coherence"].notna().astype(int)
+        mean_coh = result["avg_reply_coherence"].mean()
+        result["avg_reply_coherence"] = result["avg_reply_coherence"].fillna(mean_coh)
+        return result
+
+    def prepare_clustering_matrix(self, agents: pd.DataFrame) -> pd.DataFrame:
+        """Select notebook cluster features and drop rows with missing values."""
+        selected = [feature for feature in self.cluster_features if feature in agents.columns]
+        self.selected_features_ = selected
+        matrix = agents[selected].copy().dropna()
+        self.agents_cluster_df_ = matrix
+        return matrix
+
+    def _build_scaler(self) -> Any:
+        from sklearn.preprocessing import StandardScaler
+
+        return StandardScaler()
+
+    def _build_pca(self) -> Any:
+        from sklearn.decomposition import PCA
+
+        return PCA(n_components=self.pca_variance_threshold)
+
+    def _build_pca_vis(self) -> Any:
+        from sklearn.decomposition import PCA
+
+        return PCA(n_components=2)
+
+    def _build_gmm(self) -> Any:
+        from sklearn.mixture import GaussianMixture
+
+        return GaussianMixture(
+            n_components=self.gmm_n_components,
+            covariance_type="full",
+            random_state=42,
+        )
+
+    def _build_hdbscan_clusterer(self) -> Any:
+        import hdbscan
+
+        return hdbscan.HDBSCAN(
+            min_cluster_size=self.hdbscan_min_cluster_size,
+            min_samples=self.hdbscan_min_samples,
+            metric="euclidean",
+            cluster_selection_method="eom",
+        )
+
+    def fit_clusters(
+        self,
+        agents_cluster_df: pd.DataFrame,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Scale features, apply PCA, GMM, HDBSCAN, and 2D PCA projection."""
+        if self.scaler is None:
+            self.scaler = self._build_scaler()
+        self.x_scaled_ = self.scaler.fit_transform(agents_cluster_df)
+
+        if self.pca is None:
+            self.pca = self._build_pca()
+        self.x_pca_ = np.asarray(self.pca.fit_transform(self.x_scaled_))
+
+        if self.gmm is None:
+            self.gmm = self._build_gmm()
+        self.labels_gmm_ = np.asarray(self.gmm.fit_predict(self.x_pca_))
+
+        if self.hdbscan_clusterer is None:
+            self.hdbscan_clusterer = self._build_hdbscan_clusterer()
+        self.labels_hdbscan_ = np.asarray(self.hdbscan_clusterer.fit_predict(self.x_pca_))
+
+        if self.pca_vis is None:
+            self.pca_vis = self._build_pca_vis()
+        self.x_2d_ = np.asarray(self.pca_vis.fit_transform(self.x_scaled_))
+
+        return self.labels_gmm_, self.labels_hdbscan_, self.x_pca_, self.x_2d_
+
+    @staticmethod
+    def assign_cluster_labels(
+        agents: pd.DataFrame,
+        agents_cluster_df: pd.DataFrame,
+        labels_gmm: np.ndarray,
+        labels_hdbscan: np.ndarray,
+    ) -> pd.DataFrame:
+        """Return agent rows with GMM and HDBSCAN cluster labels."""
+        result = agents.loc[agents_cluster_df.index].copy()
+        result["gmm_cluster"] = labels_gmm
+        result["hdbscan_cluster"] = labels_hdbscan
+        return result
+
+    @staticmethod
+    def profile_clusters(
+        agents_with_clusters: pd.DataFrame,
+        trait: str,
+        cluster_col: str = "Agent_Cluster",
+    ) -> dict[str, Any]:
+        """Compute notebook-style trait profile data for a cluster assignment."""
+        if trait not in agents_with_clusters.columns:
+            return {}
+        column = agents_with_clusters[trait]
+        if column.dtype == object or column.nunique() <= 10:
+            profile: dict[str, Any] = {
+                "crosstab": pd.crosstab(
+                    agents_with_clusters[cluster_col],
+                    column,
+                    normalize="index",
+                ).round(3),
+                "raw_crosstab": pd.crosstab(agents_with_clusters[cluster_col], column),
+            }
+            raw = profile["raw_crosstab"]
+            if raw.shape[0] > 1 and raw.shape[1] > 1:
+                from scipy.stats import chi2_contingency
+
+                chi2, p_value, dof, _ = chi2_contingency(raw)
+                profile.update(
+                    {
+                        "chi2": float(chi2),
+                        "p": float(p_value),
+                        "dof": int(dof),
+                        "significance": (
+                            "SIGNIFICANT" if p_value < 0.05 else "not significant"
+                        ),
+                    }
+                )
+            unique_vals = column.dropna().unique()
+            if len(unique_vals) == 2:
+                from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+
+                label_map = {value: idx for idx, value in enumerate(unique_vals)}
+                encoded = column.dropna().map(label_map)
+                cluster_labels = agents_with_clusters.loc[encoded.index, cluster_col]
+                profile["ari"] = float(adjusted_rand_score(encoded, cluster_labels))
+                profile["nmi"] = float(normalized_mutual_info_score(encoded, cluster_labels))
+            return profile
+
+        return {
+            "describe": agents_with_clusters.groupby(cluster_col)[trait].describe().round(3)
+        }
+
+    def fit_transform_agents(
+        self,
+        agents: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Prepare feature matrix, cluster agents, and return labeled agents."""
+        matrix = self.prepare_clustering_matrix(agents)
+        labels_gmm, labels_hdbscan, _, _ = self.fit_clusters(matrix)
+        return self.assign_cluster_labels(agents, matrix, labels_gmm, labels_hdbscan)

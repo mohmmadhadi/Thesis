@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from social_analysis.user_clustering import FeatureExtractor, TweetClusterer
+from social_analysis.user_clustering import FeatureExtractor, TweetClusterer, UserClusterer
 
 
 class FakeLemmatizer:
@@ -59,6 +59,29 @@ class FakeTfidfVectorizer:
 
     def get_feature_names_out(self):
         return ["alpha", "beta", "gamma", "delta"]
+
+
+class FakeScaler:
+    def fit_transform(self, data):
+        return data.to_numpy()
+
+
+class FakePCA:
+    def __init__(self, output):
+        self.output = output
+
+    def fit_transform(self, data):
+        return self.output[: len(data)]
+
+
+class FakeGMM:
+    def fit_predict(self, data):
+        return [0, 1, 0][: len(data)]
+
+
+class FakeHDBSCAN:
+    def fit_predict(self, data):
+        return [1, -1, 1][: len(data)]
 
 
 def test_clean_tweet_matches_notebook_rules():
@@ -249,3 +272,151 @@ def test_tweet_clusterer_fit_transform_adds_coordinates_clusters_and_labels():
     ]
     assert clusterer.n_clusters_ == 1
     assert clusterer.n_noise_ == 1
+
+
+def test_user_clusterer_add_length_features_matches_notebook_names():
+    agents = pd.DataFrame({"id": [1, 2]})
+    tweets = pd.DataFrame({"user_id": [1, 1, 2], "tweet": ["aa", "aaaa", "bbb"]})
+
+    result = UserClusterer.add_length_features(agents, tweets)
+
+    assert result.loc[result["id"] == 1, "mean_len"].iloc[0] == pytest.approx(3.0)
+    assert result.loc[result["id"] == 2, "std_len"].iloc[0] == 0.0
+
+
+def test_user_clusterer_add_sentiment_features_fills_missing_values():
+    agents = pd.DataFrame({"id": [1, 2]})
+    sentiments = pd.DataFrame(
+        {
+            "user_id": [1, 1],
+            "roberta_score": [0.2, 0.8],
+            "emotion_score": [0.1, 0.3],
+        }
+    )
+
+    result = UserClusterer.add_sentiment_features(agents, sentiments)
+
+    assert result.loc[result["id"] == 1, "mean_sent"].iloc[0] == pytest.approx(0.5)
+    assert result.loc[result["id"] == 2, "mean_sent"].iloc[0] == 0.0
+    assert result.loc[result["id"] == 2, "std_emo"].iloc[0] == 0.0
+
+
+def test_user_clusterer_compute_user_tweet_cosine_matches_notebook_logic():
+    tweets = pd.DataFrame({"user_id": [1, 1, 2]})
+    embeddings = pd.DataFrame([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]]).to_numpy()
+
+    result = UserClusterer.compute_user_tweet_cosine(tweets, embeddings)
+
+    assert result.loc[result["id"] == 1, "avg_tweet_cosine_similarity"].iloc[0] == 1.0
+    assert result.loc[result["id"] == 2, "avg_tweet_cosine_similarity"].iloc[0] == 1.0
+
+
+def test_user_clusterer_add_reply_coherence_uses_notebook_weights_and_missingness():
+    agents = pd.DataFrame({"id": [1, 2]})
+    reply_sim = pd.DataFrame(
+        {
+            "user_id": [1],
+            "cosine_similarity": [0.5],
+            "bs_f1": [0.8],
+            "cross_encoder_score": [0.6],
+        }
+    )
+
+    result = UserClusterer.add_reply_coherence(agents, reply_sim)
+
+    expected = 0.20 * 0.5 + 0.35 * 0.8 + 0.45 * 0.6
+    assert result.loc[result["id"] == 1, "avg_reply_coherence"].iloc[0] == pytest.approx(expected)
+    assert result["has_parent"].tolist() == [1, 0]
+    assert result.loc[result["id"] == 2, "avg_reply_coherence"].iloc[0] == pytest.approx(expected)
+
+
+def test_user_clusterer_prepare_clustering_matrix_selects_features_and_drops_na():
+    clusterer = UserClusterer()
+    agents = pd.DataFrame(
+        {
+            "mean_sent": [0.1, 0.2],
+            "std_emo": [0.0, 0.1],
+            "mtld": [5.0, None],
+            "pronoun_ratio": [1.0, 2.0],
+            "mean_emoji_rate": [0.0, 0.1],
+            "avg_reply_coherence": [0.5, 0.6],
+            "has_parent": [1, 0],
+        }
+    )
+
+    matrix = clusterer.prepare_clustering_matrix(agents)
+
+    assert matrix.shape == (1, 7)
+    assert clusterer.selected_features_ == [
+        "mean_sent",
+        "std_emo",
+        "mtld",
+        "pronoun_ratio",
+        "mean_emoji_rate",
+        "avg_reply_coherence",
+        "has_parent",
+    ]
+
+
+def test_user_clusterer_fit_clusters_uses_injected_components():
+    clusterer = UserClusterer(
+        scaler=FakeScaler(),
+        pca=FakePCA([[0.1, 0.2], [0.3, 0.4]]),
+        pca_vis=FakePCA([[1.0, 2.0], [3.0, 4.0]]),
+        gmm=FakeGMM(),
+        hdbscan_clusterer=FakeHDBSCAN(),
+    )
+    matrix = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+
+    labels_gmm, labels_hdb, x_pca, x_2d = clusterer.fit_clusters(matrix)
+
+    assert labels_gmm.tolist() == [0, 1]
+    assert labels_hdb.tolist() == [1, -1]
+    assert x_pca.tolist() == [[0.1, 0.2], [0.3, 0.4]]
+    assert x_2d.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+
+def test_user_clusterer_assign_cluster_labels_uses_matrix_index():
+    agents = pd.DataFrame({"id": [10, 11, 12], "name": ["a", "b", "c"]})
+    matrix = pd.DataFrame({"feature": [1.0, 2.0]}, index=[0, 2])
+
+    result = UserClusterer.assign_cluster_labels(
+        agents,
+        matrix,
+        labels_gmm=pd.Series([0, 1]).to_numpy(),
+        labels_hdbscan=pd.Series([1, -1]).to_numpy(),
+    )
+
+    assert result["id"].tolist() == [10, 12]
+    assert result["gmm_cluster"].tolist() == [0, 1]
+    assert result["hdbscan_cluster"].tolist() == [1, -1]
+
+
+def test_user_clusterer_profile_clusters_returns_crosstab_and_binary_metrics():
+    agents = pd.DataFrame(
+        {
+            "Agent_Cluster": [0, 0, 1, 1],
+            "gender": ["f", "m", "f", "m"],
+        }
+    )
+
+    profile = UserClusterer.profile_clusters(agents, "gender")
+
+    assert "crosstab" in profile
+    assert "raw_crosstab" in profile
+    assert "chi2" in profile
+    assert "ari" in profile
+    assert "nmi" in profile
+
+
+def test_user_clusterer_profile_clusters_describes_numeric_trait_with_many_values():
+    agents = pd.DataFrame(
+        {
+            "Agent_Cluster": [0, 0, 1, 1] * 6,
+            "age": list(range(24)),
+        }
+    )
+
+    profile = UserClusterer.profile_clusters(agents, "age")
+
+    assert "describe" in profile
