@@ -12,6 +12,7 @@ from social_analysis.echo_chamber import (
     ANTI_ANCHORS,
     PRO_ANCHORS,
     AttitudeScorer,
+    InteractionNetworkBuilder,
     StanceEstimator,
 )
 
@@ -229,3 +230,106 @@ def test_compute_user_attitudes_sets_single_post_std_to_nan():
     user_two = result[result["user_id"] == 2].iloc[0]
     assert user_one["attitude_std"] == pytest.approx(np.std([0.2, 0.8]))
     assert np.isnan(user_two["attitude_std"])
+
+
+def test_interaction_network_builder_adds_user_nodes_with_attributes():
+    builder = InteractionNetworkBuilder()
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1],
+            "mean_attitude": [0.25],
+            "num_posts": [3],
+            "attitude_std": [0.1],
+        }
+    )
+
+    graph = builder.build_graph(
+        pd.DataFrame(columns=["id", "user_id", "comment_to", "shared_from"]),
+        user_attitudes,
+    )
+
+    assert graph.nodes[1]["attitude"] == 0.25
+    assert graph.nodes[1]["num_posts"] == 3
+    assert graph.nodes[1]["attitude_std"] == 0.1
+
+
+def test_interaction_network_builder_reply_and_retweet_edges_match_notebook_logic():
+    builder = InteractionNetworkBuilder()
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3],
+            "mean_attitude": [0.1, -0.2, 0.3],
+            "num_posts": [1, 2, 3],
+            "attitude_std": [0.0, 0.1, 0.2],
+        }
+    )
+    df = pd.DataFrame(
+        {
+            "id": [10, 11, 12, 13],
+            "user_id": [1, 2, 2, 3],
+            "comment_to": [-1, 10, 10, 13],
+            "shared_from": [-1, -1, -1, 11],
+        }
+    )
+
+    graph = builder.build_graph(df, user_attitudes)
+
+    assert graph[2][1]["weight"] == 2
+    assert graph[2][1]["type"] == "reply"
+    assert graph[3][2]["weight"] == 1
+    assert graph[3][2]["type"] == "retweet"
+    assert not graph.has_edge(3, 3)
+
+
+def test_interaction_network_builder_ignores_targets_not_in_user_nodes():
+    builder = InteractionNetworkBuilder()
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1],
+            "mean_attitude": [0.1],
+            "num_posts": [1],
+            "attitude_std": [0.0],
+        }
+    )
+    df = pd.DataFrame(
+        {
+            "id": [10, 11],
+            "user_id": [1, 2],
+            "comment_to": [-1, 10],
+            "shared_from": [-1, -1],
+        }
+    )
+
+    graph = builder.build_graph(df, user_attitudes)
+
+    assert graph.number_of_edges() == 0
+
+
+def test_interaction_network_builder_returns_undirected_graph_and_stats():
+    builder = InteractionNetworkBuilder()
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2],
+            "mean_attitude": [0.1, -0.1],
+            "num_posts": [1, 1],
+            "attitude_std": [0.0, 0.0],
+        }
+    )
+    df = pd.DataFrame(
+        {
+            "id": [10, 11],
+            "user_id": [1, 2],
+            "comment_to": [-1, 10],
+            "shared_from": [-1, -1],
+        }
+    )
+
+    directed, undirected = builder.build(df, user_attitudes)
+    stats = builder.graph_stats(directed)
+
+    assert directed.is_directed()
+    assert not undirected.is_directed()
+    assert stats["number_of_nodes"] == 2
+    assert stats["number_of_edges"] == 1
+    assert stats["number_of_connected_components"] == 1
+    assert stats["average_degree"] == pytest.approx(1.0)

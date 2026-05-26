@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
@@ -298,3 +299,126 @@ class AttitudeScorer:
         """Add sentiment_score and attitude_score columns."""
         result = self.add_sentiment_score(df, sentiment_col=sentiment_col)
         return self.add_attitude_scores(result, stance_col=stance_col)
+
+
+class InteractionNetworkBuilder:
+    """Build the directed social interaction graph from notebook 07."""
+
+    def __init__(
+        self,
+        user_col: str = "user_id",
+        tweet_id_col: str = "id",
+        reply_col: str = "comment_to",
+        share_col: str = "shared_from",
+    ) -> None:
+        self.user_col = user_col
+        self.tweet_id_col = tweet_id_col
+        self.reply_col = reply_col
+        self.share_col = share_col
+
+    def add_user_nodes(
+        self,
+        graph: nx.DiGraph,
+        user_attitudes: pd.DataFrame,
+    ) -> nx.DiGraph:
+        """Add user nodes with attitude attributes."""
+        for _, user in user_attitudes.iterrows():
+            graph.add_node(
+                user[self.user_col],
+                attitude=user["mean_attitude"],
+                num_posts=user["num_posts"],
+                attitude_std=user["attitude_std"],
+            )
+        return graph
+
+    @staticmethod
+    def _add_or_increment_edge(
+        graph: nx.DiGraph,
+        source: Any,
+        target: Any,
+        edge_type: str,
+    ) -> None:
+        if graph.has_edge(source, target):
+            graph[source][target]["weight"] += 1
+        else:
+            graph.add_edge(source, target, weight=1, type=edge_type)
+
+    def _tweet_author_lookup(self, df: pd.DataFrame) -> dict[Any, Any]:
+        return df.set_index(self.tweet_id_col)[self.user_col].to_dict()
+
+    def add_reply_edges(self, graph: nx.DiGraph, df: pd.DataFrame) -> nx.DiGraph:
+        """Add directed reply edges using comment_to."""
+        tweet_authors = self._tweet_author_lookup(df)
+        reply_interactions = df[df[self.reply_col] != -1][
+            [self.user_col, self.reply_col]
+        ].copy()
+
+        for _, row in reply_interactions.iterrows():
+            source = row[self.user_col]
+            target = tweet_authors.get(row[self.reply_col])
+            if (
+                target is not None
+                and source != target
+                and source in graph.nodes()
+                and target in graph.nodes()
+            ):
+                self._add_or_increment_edge(graph, source, target, "reply")
+        return graph
+
+    def add_share_edges(self, graph: nx.DiGraph, df: pd.DataFrame) -> nx.DiGraph:
+        """Add directed retweet/share edges using shared_from."""
+        tweet_authors = self._tweet_author_lookup(df)
+        retweet_interactions = df[df[self.share_col] != -1][
+            [self.user_col, self.share_col]
+        ].copy()
+
+        for _, row in retweet_interactions.iterrows():
+            source = row[self.user_col]
+            target = tweet_authors.get(row[self.share_col])
+            if (
+                target is not None
+                and source != target
+                and source in graph.nodes()
+                and target in graph.nodes()
+            ):
+                self._add_or_increment_edge(graph, source, target, "retweet")
+        return graph
+
+    def build_graph(
+        self,
+        df: pd.DataFrame,
+        user_attitudes: pd.DataFrame,
+    ) -> nx.DiGraph:
+        """Build the directed interaction graph."""
+        graph = nx.DiGraph()
+        self.add_user_nodes(graph, user_attitudes)
+        self.add_reply_edges(graph, df)
+        self.add_share_edges(graph, df)
+        return graph
+
+    @staticmethod
+    def to_undirected(graph: nx.DiGraph) -> nx.Graph:
+        """Convert the directed graph to undirected form."""
+        return graph.to_undirected()
+
+    @staticmethod
+    def graph_stats(graph: nx.DiGraph) -> dict[str, float | int]:
+        """Return the basic graph construction statistics printed in the notebook."""
+        stats: dict[str, float | int] = {
+            "number_of_nodes": graph.number_of_nodes(),
+            "number_of_edges": graph.number_of_edges(),
+            "density": nx.density(graph),
+            "number_of_connected_components": nx.number_weakly_connected_components(graph),
+        }
+        if graph.number_of_edges() > 0:
+            stats["average_degree"] = sum(dict(graph.degree()).values()) / graph.number_of_nodes()
+        return stats
+
+    def build(
+        self,
+        df: pd.DataFrame,
+        user_attitudes: pd.DataFrame,
+    ) -> tuple[nx.DiGraph, nx.Graph]:
+        """Return directed and undirected notebook-compatible interaction graphs."""
+        graph = self.build_graph(df, user_attitudes)
+        return graph, self.to_undirected(graph)
