@@ -4,36 +4,134 @@ paths:
   outputs: data/outputs/
   reference_outputs: reference_outputs/
 
+input_files:
+  database: local-test.db
+  tweets: tweets.csv
+  topic_tweets: topic_tweets.csv
+  mentions: mentions.csv
+  reactions: reactions.csv
+  post_hashtags: post_hashtags.csv
+  user_demo: user_demo.csv
+  sentiment_results: sentiment_results.csv
+  tweet_level_dynamics: tweet_level_dynamics.csv
+  thread_summaries: thread_summaries.csv
+  coherence_results: coherence_results.csv
+  coherence_summary: coherence_summary.csv
+  topicmodel_tweets: topicmodel_tweets.csv
+  topic_drift: topic_drift.csv
+  tweet_clusters: tweet_clusters.csv
+  agent_clusters: agent_clusters.csv
+
 columns:
   id: id
   text: tweet
+  clean_text: clean_text
   user_id: user_id
   thread_id: thread_id
   parent_id: comment_to
   comment_to: comment_to
+  shared_from: shared_from
   round: round
   day: day
   hour: hour
   reaction_count: reaction_count
+  like: like
+  dislike: dislike
+  vader_compound: vader_compound
+  vader_label: vader_label
+  roberta_compound: roberta_compound
+  roberta_label: roberta_label
+  roberta_score: roberta_score
+  emotion_label: emotion_label
+  emotion_score: emotion_score
+  emotion_valence: emotion_valence
+  emotion_arousal: emotion_arousal
+  cosine_similarity: cosine_similarity
+  bs_f1: bs_f1
+  cross_encoder_score: cross_encoder_score
+  stance_ensemble: stance_ensemble
+  attitude_score: attitude_score
+  propagated_attitude: propagated_attitude
+  exposure_diversity: exposure_diversity
+  community: community
 
 models:
   sentence_transformer: sentence-transformers/all-MiniLM-L6-v2
+  echo_chamber_sentence_transformer: all-MiniLM-L6-v2
   cross_encoder: cross-encoder/stsb-roberta-base
   sentiment_model: cardiffnlp/twitter-roberta-base-sentiment-latest
   emotion_model: j-hartmann/emotion-english-distilroberta-base
+  bertscore_model: roberta-large
+  bertopic_embedding_model: all-MiniLM-L6-v2
+
+sentiment:
+  transformer_batch_size: 32
+  emotion_labels:
+    - anger
+    - disgust
+    - fear
+    - joy
+    - neutral
+    - sadness
+    - surprise
 
 coherence:
-  low_threshold: 0.35
+  cosine_low_threshold: 0.25
+  bertscore_low_threshold: 0.85
+  cross_encoder_low_threshold: 0.50
+  batch_size: 64
+  device: cpu
+  pairing_strategy: thread_root
 
 conversation:
-  changepoint_penalty: 5
+  signal: roberta_compound
+  secondary_signal: vader_compound
+  min_turns_dynamics: 3
+  slope_threshold: 0.05
+  volatility_threshold: 0.25
+  changepoint_model: rbf
+  changepoint_penalty: 3
 
 topic_modeling:
   lda_num_topics: 8
+  lda_passes: 10
+  lda_no_below: 10
+  lda_no_above: 0.5
+  min_tokens: 7
   random_state: 42
 
 clustering:
+  embedding_batch_size: 64
+  umap_n_neighbors: 15
+  umap_min_dist: 0.1
   random_state: 42
+  hdbscan_min_cluster_size_tweets: 20
+  hdbscan_min_samples_tweets: 3
+  pca_variance_threshold: 0.80
+  gmm_n_components: 4
+  hdbscan_min_cluster_size_agents: 6
+  hdbscan_min_samples_agents: 2
+  cluster_features:
+    - mean_sent
+    - std_emo
+    - mtld
+    - pronoun_ratio
+    - mean_emoji_rate
+    - avg_reply_coherence
+    - has_parent
 
 echo_chamber:
-  polarization_threshold: 0.5
+  pro_stance_threshold: 0.3
+  anti_stance_threshold: -0.3
+  beta: 0.5
+  embedding_batch_size: 32
+  polarization_score_weights:
+    variance: 0.4
+    bimodality: 0.3
+    inter_group_distance: 0.3
+  echo_chamber_score_weights:
+    polarization: 0.3
+    homophily: 0.3
+    diversity: 0.2
+    separation: 0.2
+  # TODO: stance prototype texts are currently preserved in src/social_analysis/echo_chamber.py.
