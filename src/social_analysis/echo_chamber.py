@@ -195,6 +195,13 @@ class StanceEstimator:
         """Run the notebook stance-estimation workflow on a DataFrame."""
         result = df.copy()
         result["stance_score_initial"] = result[initial_score_col]
+
+        if text_col not in result.columns:
+            raise KeyError(f"Text column '{text_col}' not found in dataframe.")
+
+        result[text_col] = result[text_col].fillna("").astype(str)
+        result = result[result[text_col].str.strip().ne("")].copy()
+
         embeddings = self.compute_embeddings(result[text_col].tolist())
         self.prototype_pro, self.prototype_anti = self.build_stance_prototypes(
             embeddings,
