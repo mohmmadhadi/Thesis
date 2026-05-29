@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from social_analysis.user_clustering import FeatureExtractor, TweetClusterer, UserClusterer
+from social_analysis.visualization import UserClusteringVisualizer
 
 
 class FakeLemmatizer:
@@ -334,6 +335,42 @@ def test_tweet_clusterer_overlap_diagnostics_returns_ari_nmi_and_missing_trait()
     assert missing_row["significance"] == "missing"
     assert missing_row["ari_nmi_status"] == "missing"
     assert missing_row["n_values"] == 0
+
+
+def test_tweet_clusterer_trait_visualization_helpers_match_notebook_names():
+    tweets = pd.DataFrame(
+        {
+            "tweet": ["a" * 100],
+            "ex": ["high"],
+        }
+    )
+
+    shortened = TweetClusterer.add_tweet_short(tweets)
+    symbol_map = TweetClusterer.trait_symbol_map(
+        pd.DataFrame({"ex": ["low", "high", "medium"]}),
+        "ex",
+    )
+
+    assert shortened["tweet_short"].iloc[0] == "a" * 90 + "..."
+    assert symbol_map == {"high": "circle", "low": "x", "medium": "diamond"}
+    assert TweetClusterer.trait_scatter_filename("ex") == "tweet_clusters_ex.html"
+    assert TweetClusterer.trait_heatmap_filename("ex") == "heatmap_cluster_ex.html"
+
+
+def test_user_clustering_visualizer_trait_methods_skip_missing_columns(tmp_path):
+    visualizer = UserClusteringVisualizer()
+    tweets = pd.DataFrame(
+        {
+            "x": [0.0],
+            "y": [1.0],
+            "cluster_label": ["Cluster 0"],
+            "cluster": [0],
+        }
+    )
+
+    assert visualizer.save_tweet_trait_scatter_html(tweets, "ex", tmp_path) is None
+    assert visualizer.save_cluster_trait_heatmap_html(tweets, "ex", tmp_path) is None
+    assert visualizer.save_trait_visualizations_html(tweets, ["ex"], tmp_path) == []
 
 
 def test_user_clusterer_add_length_features_matches_notebook_names():

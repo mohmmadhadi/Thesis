@@ -878,6 +878,141 @@ class UserClusteringVisualizer:
         fig.write_html(output_path)
         return output_path
 
+    def save_tweet_trait_scatter_html(
+        self,
+        tweets: pd.DataFrame,
+        trait: str,
+        out_dir: str | Path,
+    ) -> Path | None:
+        """Save notebook trait-specific tweet cluster scatter HTML."""
+        required = {"x", "y", "cluster_label", trait}
+        if not required.issubset(tweets.columns):
+            return None
+        import plotly.express as px
+
+        data = tweets.copy()
+        if "tweet_short" not in data.columns and "tweet" in data.columns:
+            data["tweet_short"] = data["tweet"].astype(str).str[:90] + "..."
+        default_symbols = [
+            "circle",
+            "x",
+            "diamond",
+            "cross",
+            "square",
+            "triangle-up",
+            "triangle-down",
+            "pentagon",
+            "hexagon",
+            "star",
+        ]
+        unique_vals = sorted(data[trait].dropna().unique())
+        symbol_map = {
+            value: default_symbols[index % len(default_symbols)]
+            for index, value in enumerate(unique_vals)
+        }
+        hover_data = {trait: True, "x": False, "y": False}
+        if "tweet_short" in data.columns:
+            hover_data["tweet_short"] = True
+
+        output_path = self._prepare_out_dir(out_dir) / f"tweet_clusters_{trait}.html"
+        fig = px.scatter(
+            data,
+            x="x",
+            y="y",
+            color="cluster_label",
+            symbol=trait,
+            symbol_map=symbol_map,
+            hover_data=hover_data,
+            title=f"Tweet Clusters -- colour: cluster | shape: {trait.upper()}",
+            labels={"cluster_label": "Cluster", trait: trait.upper()},
+            color_discrete_sequence=px.colors.qualitative.Bold,
+            template="plotly_white",
+            width=950,
+            height=650,
+        )
+        fig.update_traces(
+            marker=dict(
+                size=9,
+                opacity=0.85,
+                line=dict(width=0.5, color="white"),
+            )
+        )
+        fig.write_html(output_path)
+        return output_path
+
+    def save_cluster_trait_heatmap_html(
+        self,
+        tweets: pd.DataFrame,
+        trait: str,
+        out_dir: str | Path,
+    ) -> Path | None:
+        """Save notebook cluster-by-trait annotated heatmap HTML."""
+        required = {"cluster", "cluster_label", trait}
+        if not required.issubset(tweets.columns):
+            return None
+        import plotly.graph_objects as go
+
+        df_clean_tweets = tweets[tweets["cluster"] != -1].copy()
+        ct = pd.crosstab(df_clean_tweets["cluster_label"], df_clean_tweets[trait])
+        if ct.empty:
+            return None
+
+        z_text = []
+        for row in ct.values:
+            total = row.sum()
+            z_text.append(
+                [f"{value}<br>({value / total:.0%})" if total > 0 else "0" for value in row]
+            )
+
+        fig = go.Figure(
+            go.Heatmap(
+                z=ct.values,
+                x=ct.columns.tolist(),
+                y=ct.index.tolist(),
+                colorscale="Blues",
+                colorbar=dict(title="Count"),
+            )
+        )
+        for i, row in enumerate(z_text):
+            for j, text in enumerate(row):
+                fig.add_annotation(
+                    x=ct.columns[j],
+                    y=ct.index[i],
+                    text=text,
+                    showarrow=False,
+                    font=dict(size=11, color="black"),
+                )
+        fig.update_layout(
+            title=f"Cluster x {trait.upper()} -- count + row %",
+            xaxis_title=f"{trait.upper()}",
+            yaxis_title="Cluster",
+            template="plotly_white",
+            width=750,
+            height=500,
+            font=dict(family="Inter, Arial, sans-serif"),
+            margin=dict(l=120),
+        )
+        output_path = self._prepare_out_dir(out_dir) / f"heatmap_cluster_{trait}.html"
+        fig.write_html(output_path)
+        return output_path
+
+    def save_trait_visualizations_html(
+        self,
+        tweets: pd.DataFrame,
+        traits: list[str],
+        out_dir: str | Path,
+    ) -> list[Path]:
+        """Save all notebook trait-specific tweet scatter and heatmap HTMLs."""
+        outputs: list[Path] = []
+        for trait in traits:
+            scatter = self.save_tweet_trait_scatter_html(tweets, trait, out_dir)
+            if scatter is not None:
+                outputs.append(scatter)
+            heatmap = self.save_cluster_trait_heatmap_html(tweets, trait, out_dir)
+            if heatmap is not None:
+                outputs.append(heatmap)
+        return outputs
+
     def save_agent_clusters_html(self, agents: pd.DataFrame, out_dir: str | Path) -> Path | None:
         """Save the agent cluster scatter plot when PCA coordinates exist."""
         x_col = "PC1" if "PC1" in agents.columns else None

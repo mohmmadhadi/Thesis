@@ -405,6 +405,53 @@ class TweetClusterer:
         }
 
     @staticmethod
+    def add_tweet_short(
+        tweets: pd.DataFrame,
+        text_col: str = "tweet",
+    ) -> pd.DataFrame:
+        """Add notebook 90-character hover preview text."""
+        result = tweets.copy()
+        if text_col in result.columns:
+            result["tweet_short"] = result[text_col].astype(str).str[:90] + "..."
+        return result
+
+    @staticmethod
+    def trait_symbol_map(
+        tweets: pd.DataFrame,
+        trait: str,
+    ) -> dict[Any, str]:
+        """Return notebook Plotly symbol mapping for one trait."""
+        default_symbols = [
+            "circle",
+            "x",
+            "diamond",
+            "cross",
+            "square",
+            "triangle-up",
+            "triangle-down",
+            "pentagon",
+            "hexagon",
+            "star",
+        ]
+        if trait not in tweets.columns:
+            return {}
+        unique_vals = sorted(tweets[trait].dropna().unique())
+        return {
+            value: default_symbols[index % len(default_symbols)]
+            for index, value in enumerate(unique_vals)
+        }
+
+    @staticmethod
+    def trait_scatter_filename(trait: str) -> str:
+        """Return notebook trait-specific tweet cluster HTML filename."""
+        return f"tweet_clusters_{trait}.html"
+
+    @staticmethod
+    def trait_heatmap_filename(trait: str) -> str:
+        """Return notebook cluster-trait heatmap HTML filename."""
+        return f"heatmap_cluster_{trait}.html"
+
+    @staticmethod
     def cluster_trait_overlap_diagnostics(
         tweets: pd.DataFrame,
         traits: list[str] | None = None,

@@ -13,7 +13,7 @@ if str(SRC_DIR) not in sys.path:
 
 from social_analysis.config import Config
 from social_analysis.data_loader import DataLoader
-from social_analysis.user_clustering import TweetClusterer, UserClusterer
+from social_analysis.user_clustering import PERSONALITY_TRAITS, TweetClusterer, UserClusterer
 from social_analysis.visualization import UserClusteringVisualizer
 
 
@@ -85,8 +85,12 @@ def main() -> None:
 
     visualizer = UserClusteringVisualizer()
     visualizer.save_tweet_clusters_html(tweet_clusters, html_dir)
+    visualizer.save_trait_visualizations_html(
+        tweet_clusters,
+        [trait for trait in PERSONALITY_TRAITS if trait in tweet_clusters.columns],
+        html_dir,
+    )
     visualizer.save_agent_clusters_html(agent_clusters, html_dir)
-    # TODO: trait-specific tweet cluster and heatmap HTML plots require confirmed trait columns.
 
 
 if __name__ == "__main__":
