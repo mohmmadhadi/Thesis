@@ -21,7 +21,7 @@ The project analyzes simulated social media conversations, including exploratory
 |   |-- 04_response_coherence.ipynb
 |   |-- 05_topic_model.ipynb
 |   |-- 06_user_clustering.ipynb
-|   `-- 07_eco_chamber.ipynb
+|   `-- 07_echo_chamber.ipynb
 |-- reference_outputs/
 |-- scripts/
 |   |-- run_eda.py
@@ -233,5 +233,5 @@ The tests focus on deterministic behavior and mocked components. They intentiona
 - Plotting and interactive visualizations from notebooks are only partially extracted.
 - Some package modules still rely on heavy optional dependencies at runtime.
 - `src/social_analysis/eda.py` and `src/social_analysis/utils.py` are placeholders.
-- The echo chamber notebook filename is currently `07_eco_chamber.ipynb`.
+- The echo chamber notebook filename is `07_echo_chamber.ipynb`.
 - No generated results should be assumed to exist until the scripts are run locally with the required input data.

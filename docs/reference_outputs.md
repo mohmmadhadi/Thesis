@@ -283,7 +283,7 @@ Important metrics/tables to preserve manually if needed:
 
 Notebook: `notebooks/07_echo_chamber.ipynb`
 
-Note: the current repository file is named `notebooks/07_eco_chamber.ipynb`. Preserve the current filename unless the project intentionally renames it.
+Note: the notebook file has been renamed to `notebooks/07_echo_chamber.ipynb`. Use the new filename consistently in documentation, scripts, and tests.
 
 Target folder:
 
