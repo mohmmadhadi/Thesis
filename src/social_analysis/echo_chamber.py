@@ -1055,6 +1055,163 @@ class EchoChamberAnalyzer:
         return community_stats.sort_values("size", ascending=False)
 
     @staticmethod
+    def detect_sub_communities(
+        graph: nx.Graph,
+        user_df: pd.DataFrame,
+        top_n: int = 5,
+        user_col: str = "user_id",
+        community_col: str = "community",
+    ) -> pd.DataFrame:
+        """Run notebook recursive Louvain detection on top parent communities."""
+        import community as community_louvain
+
+        top_comm_ids = (
+            user_df[community_col].value_counts().head(top_n).index.tolist()
+        )
+        sub_comm_results: list[dict[str, Any]] = []
+
+        for comm_id in top_comm_ids:
+            comm_nodes = user_df[user_df[community_col] == comm_id][user_col].tolist()
+            subgraph = graph.subgraph(comm_nodes)
+
+            if subgraph.number_of_edges() > 0:
+                sub_partition = community_louvain.best_partition(subgraph)
+            else:
+                sub_partition = {node: 0 for node in comm_nodes}
+
+            for node, sub_id in sub_partition.items():
+                sub_comm_results.append(
+                    {
+                        "user_id": node,
+                        "parent_community": comm_id,
+                        "sub_community": f"{comm_id}_{sub_id}",
+                    }
+                )
+
+        return pd.DataFrame(sub_comm_results)
+
+    @classmethod
+    def add_sub_community_labels(
+        cls,
+        user_attitudes: pd.DataFrame,
+        sub_communities: pd.DataFrame,
+        user_col: str = "user_id",
+    ) -> pd.DataFrame:
+        """Merge notebook sub-community labels and fill non-top communities."""
+        result = user_attitudes.copy()
+        columns_to_drop = [
+            column
+            for column in ["parent_community", "sub_community"]
+            if column in result.columns
+        ]
+        if columns_to_drop:
+            result = result.drop(columns=columns_to_drop)
+
+        result = result.merge(sub_communities, on=user_col, how="left")
+        result["sub_community"] = result["sub_community"].fillna("None")
+        return result
+
+    @classmethod
+    def compute_sub_community_echo_scores(
+        cls,
+        graph: nx.Graph,
+        user_attitudes: pd.DataFrame,
+        user_col: str = "user_id",
+    ) -> pd.DataFrame:
+        """Compute notebook echo chamber scores for each detected sub-community."""
+        sub_echo_results = []
+        unique_subs = [
+            sub_id
+            for sub_id in user_attitudes["sub_community"].unique()
+            if sub_id != "None"
+        ]
+
+        for sub_id in unique_subs:
+            sub_users = user_attitudes[user_attitudes["sub_community"] == sub_id]
+            sub_nodes = sub_users[user_col].tolist()
+            sub_graph = graph.subgraph(sub_nodes)
+
+            sub_attitudes = dict(
+                zip(sub_users[user_col], sub_users["propagated_attitude"])
+            )
+            polarization = cls.measure_polarization(sub_attitudes)
+            homophily = cls.measure_homophily(sub_graph, sub_attitudes)
+            diversity_stats = sub_users["exposure_diversity"].dropna()
+            temp_comm_stats = pd.DataFrame(
+                [
+                    {
+                        "avg_attitude": sub_users["propagated_attitude"].mean(),
+                        "attitude_std": sub_users["propagated_attitude"].std(),
+                    }
+                ]
+            )
+
+            echo_scores = cls.compute_echo_chamber_score(
+                polarization,
+                homophily,
+                diversity_stats,
+                temp_comm_stats,
+            )
+            sub_echo_results.append(
+                {
+                    "sub_community": sub_id,
+                    "size": len(sub_users),
+                    "echo_chamber_score": echo_scores["overall_score"],
+                    "polarization": echo_scores["polarization_score"],
+                    "homophily": echo_scores["homophily_score"],
+                    "diversity": echo_scores["diversity_score"],
+                    "separation": echo_scores["separation_score"],
+                }
+            )
+
+        columns = [
+            "sub_community",
+            "size",
+            "echo_chamber_score",
+            "polarization",
+            "homophily",
+            "diversity",
+            "separation",
+        ]
+        return pd.DataFrame(sub_echo_results, columns=columns).sort_values(
+            "echo_chamber_score",
+            ascending=False,
+        )
+
+    @classmethod
+    def analyze_sub_communities(
+        cls,
+        graph: nx.Graph,
+        user_attitudes: pd.DataFrame,
+        top_n: int = 5,
+        user_col: str = "user_id",
+        community_col: str = "community",
+    ) -> dict[str, pd.DataFrame]:
+        """Run notebook sub-community detection, merge labels, and score them."""
+        sub_communities = cls.detect_sub_communities(
+            graph,
+            user_attitudes,
+            top_n=top_n,
+            user_col=user_col,
+            community_col=community_col,
+        )
+        labeled_users = cls.add_sub_community_labels(
+            user_attitudes,
+            sub_communities,
+            user_col=user_col,
+        )
+        sub_echo_scores = cls.compute_sub_community_echo_scores(
+            graph,
+            labeled_users,
+            user_col=user_col,
+        )
+        return {
+            "sub_communities": sub_communities,
+            "user_attitudes": labeled_users,
+            "sub_echo_scores": sub_echo_scores,
+        }
+
+    @staticmethod
     def compute_echo_chamber_score(
         polarization: dict[str, float],
         homophily: dict[str, float],
@@ -1295,6 +1452,13 @@ class EchoChamberPipeline:
             pca_model_2d,
             user_attitudes,
         )
+        sub_community_results = self.analyzer.analyze_sub_communities(
+            graph_undirected,
+            user_attitudes,
+            top_n=10,
+            user_col=user_col,
+        )
+        user_attitudes = sub_community_results["user_attitudes"]
 
         return {
             "tweets": tweet_df,
@@ -1326,4 +1490,6 @@ class EchoChamberPipeline:
             "echo_chamber_metrics_optimized_2d": echo_chamber_metrics_optimized_2d,
             "landscape_df": landscape_df,
             "landscape_data": landscape_data,
+            "sub_communities": sub_community_results["sub_communities"],
+            "sub_echo_scores": sub_community_results["sub_echo_scores"],
         }

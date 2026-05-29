@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import types
 
 import networkx as nx
 import numpy as np
@@ -18,6 +19,25 @@ from social_analysis.echo_chamber import (
     InteractionNetworkBuilder,
     StanceEstimator,
 )
+
+
+def install_fake_louvain(monkeypatch):
+    """Install a tiny fake Louvain module for dependency-free tests."""
+    fake_community = types.SimpleNamespace()
+
+    def best_partition(graph):
+        partition = {}
+        for index, nodes in enumerate(nx.connected_components(graph)):
+            for node in nodes:
+                partition[node] = index
+        return partition
+
+    def modularity(partition, graph):
+        return 0.0
+
+    fake_community.best_partition = best_partition
+    fake_community.modularity = modularity
+    monkeypatch.setitem(sys.modules, "community", fake_community)
 
 
 class FakeEmbeddingModel:
@@ -203,6 +223,35 @@ class FakeEchoChamberAnalyzer:
             "explained_variance_ratio": np.array([0.6, 0.4]),
             "x_col": "PC1_Ideological",
             "y_col": "PC2_Structural",
+        }
+
+    def analyze_sub_communities(
+        self,
+        graph,
+        user_attitudes,
+        top_n=5,
+        user_col="user_id",
+        community_col="community",
+    ):
+        labeled = user_attitudes.copy()
+        labeled["parent_community"] = labeled["community"]
+        labeled["sub_community"] = labeled["community"].map(lambda value: f"{value}_0")
+        return {
+            "sub_communities": labeled[
+                ["user_id", "parent_community", "sub_community"]
+            ],
+            "user_attitudes": labeled,
+            "sub_echo_scores": pd.DataFrame(
+                {
+                    "sub_community": ["0_0", "1_0"],
+                    "size": [1, 1],
+                    "echo_chamber_score": [0.5, 0.4],
+                    "polarization": [0.1, 0.2],
+                    "homophily": [0.3, 0.4],
+                    "diversity": [0.5, 0.6],
+                    "separation": [0.0, 0.0],
+                }
+            ),
         }
 
 
@@ -593,6 +642,139 @@ def test_echo_chamber_analyzer_add_labels_and_community_stats_match_notebook_col
     assert stats.loc[0, "size"] == 2
     assert stats.loc[0, "avg_attitude"] == pytest.approx(0.6)
     assert stats.index.tolist()[0] == 0
+
+
+def test_echo_chamber_analyzer_detect_sub_communities_preserves_notebook_columns(
+    monkeypatch,
+):
+    install_fake_louvain(monkeypatch)
+    graph = nx.Graph()
+    graph.add_edges_from([(1, 2), (3, 4)])
+    graph.add_nodes_from([5, 6])
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4, 5, 6],
+            "community": [0, 0, 0, 0, 1, 1],
+        }
+    )
+
+    result = EchoChamberAnalyzer.detect_sub_communities(
+        graph,
+        user_attitudes,
+        top_n=2,
+    )
+
+    assert result.columns.tolist() == [
+        "user_id",
+        "parent_community",
+        "sub_community",
+    ]
+    assert set(result["user_id"]) == {1, 2, 3, 4, 5, 6}
+    assert set(result["parent_community"]) == {0, 1}
+    assert all(
+        str(sub).startswith(f"{parent}_")
+        for parent, sub in zip(result["parent_community"], result["sub_community"])
+    )
+    small_parent = result[result["parent_community"] == 1]
+    assert small_parent["sub_community"].tolist() == ["1_0", "1_0"]
+
+
+def test_echo_chamber_analyzer_add_sub_community_labels_fills_non_top_communities():
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3],
+            "community": [0, 0, 1],
+            "parent_community": ["old", "old", "old"],
+            "sub_community": ["old", "old", "old"],
+        }
+    )
+    sub_communities = pd.DataFrame(
+        {
+            "user_id": [1, 2],
+            "parent_community": [0, 0],
+            "sub_community": ["0_0", "0_0"],
+        }
+    )
+
+    result = EchoChamberAnalyzer.add_sub_community_labels(
+        user_attitudes,
+        sub_communities,
+    )
+
+    assert result["sub_community"].tolist() == ["0_0", "0_0", "None"]
+    assert result["parent_community"].iloc[0] == 0
+    assert pd.isna(result["parent_community"].iloc[2])
+
+
+def test_echo_chamber_analyzer_compute_sub_community_echo_scores_columns_and_sort():
+    graph = nx.Graph()
+    graph.add_edges_from([(1, 2), (3, 4)])
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4, 5],
+            "propagated_attitude": [0.5, 0.5, -0.4, -0.4, 0.1],
+            "exposure_diversity": [0.2, 0.2, 0.7, 0.7, 0.5],
+            "sub_community": ["0_0", "0_0", "0_1", "0_1", "None"],
+        }
+    )
+
+    result = EchoChamberAnalyzer.compute_sub_community_echo_scores(
+        graph,
+        user_attitudes,
+    )
+
+    assert result.columns.tolist() == [
+        "sub_community",
+        "size",
+        "echo_chamber_score",
+        "polarization",
+        "homophily",
+        "diversity",
+        "separation",
+    ]
+    assert set(result["sub_community"]) == {"0_0", "0_1"}
+    assert result["size"].tolist() == [2, 2]
+    assert result["echo_chamber_score"].is_monotonic_decreasing
+    assert np.issubdtype(result["echo_chamber_score"].dtype, np.number)
+
+
+def test_echo_chamber_analyzer_analyze_sub_communities_returns_merged_scores(
+    monkeypatch,
+):
+    install_fake_louvain(monkeypatch)
+    graph = nx.Graph()
+    graph.add_edges_from([(1, 2), (3, 4)])
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4, 5],
+            "community": [0, 0, 0, 0, 1],
+            "propagated_attitude": [0.5, 0.5, -0.4, -0.4, 0.2],
+            "exposure_diversity": [0.2, 0.2, 0.7, 0.7, 0.5],
+        }
+    )
+
+    result = EchoChamberAnalyzer.analyze_sub_communities(
+        graph,
+        user_attitudes,
+        top_n=1,
+    )
+
+    assert set(result) == {"sub_communities", "user_attitudes", "sub_echo_scores"}
+    assert "parent_community" in result["user_attitudes"].columns
+    assert "sub_community" in result["user_attitudes"].columns
+    assert result["user_attitudes"].loc[
+        result["user_attitudes"]["user_id"] == 5,
+        "sub_community",
+    ].iloc[0] == "None"
+    assert result["sub_echo_scores"].columns.tolist() == [
+        "sub_community",
+        "size",
+        "echo_chamber_score",
+        "polarization",
+        "homophily",
+        "diversity",
+        "separation",
+    ]
 
 
 def test_echo_chamber_analyzer_compute_echo_chamber_score_matches_notebook_weights():
