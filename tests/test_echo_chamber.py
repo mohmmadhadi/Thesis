@@ -186,6 +186,25 @@ class FakeEchoChamberAnalyzer:
         result["PC2_Structural"] = [0.0, 1.0]
         return result
 
+    def build_echo_chamber_landscape_data(
+        self,
+        metrics_df,
+        metrics_scaled,
+        pca_model,
+        user_attitudes,
+    ):
+        return {
+            "landscape_df": self.build_echo_chamber_landscape_dataframe(
+                metrics_df,
+                metrics_scaled,
+                pca_model,
+                user_attitudes,
+            ),
+            "explained_variance_ratio": np.array([0.6, 0.4]),
+            "x_col": "PC1_Ideological",
+            "y_col": "PC2_Structural",
+        }
+
 
 class ExplodingStanceEstimator:
     def transform_dataframe(self, *args, **kwargs):
@@ -833,6 +852,65 @@ def test_echo_chamber_analyzer_2d_pca_outputs_weights_metrics_and_landscape_shap
     assert set(score) == {"score_pc1", "score_pc2", "final_combined_score"}
     assert {"PC1_Ideological", "PC2_Structural"}.issubset(landscape.columns)
     assert len(landscape) == 4
+
+
+def test_echo_chamber_analyzer_landscape_data_preserves_notebook_plot_fields():
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    metrics_df = pd.DataFrame(
+        {
+            "user_id": [10, 11, 12, 13],
+            "polarization": [0.9, 0.7, 0.2, 0.1],
+            "homophily": [1.0, 0.8, 0.1, 0.2],
+            "diversity": [0.8, 0.6, 0.3, 0.4],
+            "separation": [0.7, 0.5, 0.2, 0.1],
+        }
+    )
+    original_columns = metrics_df.columns.tolist()
+    user_df = pd.DataFrame(
+        {
+            "user_id": [10, 11, 12, 13],
+            "community": [0, 0, 1, 1],
+            "propagated_attitude": [0.8, 0.6, -0.4, -0.2],
+        }
+    )
+    scaler = StandardScaler()
+    feature_cols = ["polarization", "homophily", "diversity", "separation"]
+    metrics_scaled = scaler.fit_transform(metrics_df[feature_cols])
+    pca = PCA(n_components=2)
+    pca.fit(metrics_scaled)
+
+    result = EchoChamberAnalyzer.build_echo_chamber_landscape_data(
+        metrics_df,
+        metrics_scaled,
+        pca,
+        user_df,
+    )
+    landscape = result["landscape_df"]
+
+    assert metrics_df.columns.tolist() == original_columns
+    assert {"PC1_Ideological", "PC2_Structural"}.issubset(landscape.columns)
+    assert landscape["user_id"].tolist() == [10, 11, 12, 13]
+    assert landscape["community"].tolist() == [0, 0, 1, 1]
+    assert landscape["propagated_attitude"].tolist() == [0.8, 0.6, -0.4, -0.2]
+    assert feature_cols == ["polarization", "homophily", "diversity", "separation"]
+    assert all(column in landscape.columns for column in feature_cols)
+    assert result["explained_variance_ratio"].shape == (2,)
+    assert result["pca_components"].shape == (2, 4)
+    assert result["x_col"] == "PC1_Ideological"
+    assert result["y_col"] == "PC2_Structural"
+    assert result["hue_col"] == "community"
+    assert result["size_col"] == "polarization"
+    assert result["title"] == "Echo Chamber Landscape: Ideological vs. Structural Bias"
+    assert result["size_range"] == (30, 300)
+    assert result["palette"] == "Set1"
+    assert result["edgecolor"] == "black"
+    assert result["origin_lines"] == {"x": 0, "y": 0}
+    assert [item["label"] for item in result["quadrant_annotations"]] == [
+        "Double Trap\n(Radical & Isolated)",
+        "Bridge Agents\n(Moderate & Diverse)",
+    ]
 
 
 def test_echo_chamber_pipeline_orchestrates_existing_stance_columns():

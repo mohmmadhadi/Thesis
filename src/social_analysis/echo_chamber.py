@@ -709,6 +709,60 @@ class EchoChamberAnalyzer:
             on="user_id",
         )
 
+    @classmethod
+    def build_echo_chamber_landscape_data(
+        cls,
+        metrics_df: pd.DataFrame,
+        metrics_scaled: np.ndarray,
+        pca_model: Any,
+        user_df: pd.DataFrame,
+    ) -> dict[str, Any]:
+        """Return plot-ready data and metadata for the notebook 2D PCA landscape."""
+        landscape_df = cls.build_echo_chamber_landscape_dataframe(
+            metrics_df,
+            metrics_scaled,
+            pca_model,
+            user_df,
+        )
+
+        return {
+            "landscape_df": landscape_df,
+            "explained_variance_ratio": pca_model.explained_variance_ratio_,
+            "pca_components": pca_model.components_,
+            "x_col": "PC1_Ideological",
+            "y_col": "PC2_Structural",
+            "hue_col": "community",
+            "size_col": "polarization",
+            "title": "Echo Chamber Landscape: Ideological vs. Structural Bias",
+            "xlabel": (
+                "PC1: Ideological Extremism & Separation \n"
+                "<-- Moderate --- Radical -->"
+            ),
+            "ylabel": (
+                "PC2: Structural Homophily & Isolation \n"
+                "<-- Diverse Networks --- Isolated Networks -->"
+            ),
+            "size_range": (30, 300),
+            "alpha": 0.7,
+            "palette": "Set1",
+            "edgecolor": "black",
+            "origin_lines": {"x": 0, "y": 0},
+            "quadrant_annotations": [
+                {
+                    "label": "Double Trap\n(Radical & Isolated)",
+                    "x_multiplier": 0.7,
+                    "y_multiplier": 0.85,
+                    "color": "darkred",
+                },
+                {
+                    "label": "Bridge Agents\n(Moderate & Diverse)",
+                    "x_multiplier": 0.8,
+                    "y_multiplier": 0.8,
+                    "color": "darkgreen",
+                },
+            ],
+        }
+
     @staticmethod
     def improved_bimodality_test(
         attitudes_array: list[float] | np.ndarray,
@@ -1235,6 +1289,12 @@ class EchoChamberPipeline:
             pca_model_2d,
             user_attitudes,
         )
+        landscape_data = self.analyzer.build_echo_chamber_landscape_data(
+            pca_metrics_df,
+            pca_metrics_scaled,
+            pca_model_2d,
+            user_attitudes,
+        )
 
         return {
             "tweets": tweet_df,
@@ -1265,4 +1325,5 @@ class EchoChamberPipeline:
             "pca_metrics_scaled": pca_metrics_scaled,
             "echo_chamber_metrics_optimized_2d": echo_chamber_metrics_optimized_2d,
             "landscape_df": landscape_df,
+            "landscape_data": landscape_data,
         }
