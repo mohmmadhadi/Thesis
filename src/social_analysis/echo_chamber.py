@@ -1212,6 +1212,285 @@ class EchoChamberAnalyzer:
         }
 
     @staticmethod
+    def merge_tweets_with_communities(
+        tweets_df: pd.DataFrame,
+        user_attitudes: pd.DataFrame,
+        user_col: str = "user_id",
+        community_col: str = "community",
+    ) -> pd.DataFrame:
+        """Add notebook community labels to the tweet-level DataFrame."""
+        return tweets_df.merge(
+            user_attitudes[[user_col, community_col]],
+            on=user_col,
+            how="left",
+        )
+
+    @staticmethod
+    def get_community_keywords(
+        df_tweets: pd.DataFrame,
+        comm_col: str,
+        top_n: int = 5,
+        text_col: str = "clean_text",
+    ) -> dict[Any, str]:
+        """Extract notebook TF-IDF keyword strings for each community."""
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        keywords_map = {}
+        unique_comms = df_tweets[comm_col].unique()
+        for community_id in unique_comms:
+            if community_id == "None":
+                continue
+            texts = df_tweets[df_tweets[comm_col] == community_id][text_col].dropna()
+            if len(texts) > 2:
+                vectorizer = TfidfVectorizer(stop_words="english", max_features=20)
+                try:
+                    tfidf_matrix = vectorizer.fit_transform(texts)
+                    scores = np.asarray(tfidf_matrix.mean(axis=0)).flatten()
+                    words = vectorizer.get_feature_names_out()
+                    top_words = [
+                        words[index] for index in scores.argsort()[-top_n:][::-1]
+                    ]
+                    keywords_map[community_id] = ", ".join(top_words)
+                except ValueError:
+                    keywords_map[community_id] = "Insufficient data"
+            else:
+                keywords_map[community_id] = "Insufficient data"
+        return keywords_map
+
+    @staticmethod
+    def extract_top_community_keywords(
+        df_with_comm: pd.DataFrame,
+        community_stats: pd.DataFrame,
+        top_n_communities: int = 2,
+        top_n_keywords: int = 10,
+        text_col: str = "clean_text",
+        community_col: str = "community",
+    ) -> pd.DataFrame:
+        """Return notebook top TF-IDF n-gram keywords for top communities."""
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        top_communities = community_stats.index[:top_n_communities].tolist()
+        results = []
+
+        for community_id in top_communities:
+            comm_tweets = df_with_comm[
+                df_with_comm[community_col] == community_id
+            ][text_col].dropna()
+
+            if len(comm_tweets) > 0:
+                vectorizer = TfidfVectorizer(
+                    stop_words="english",
+                    max_features=1000,
+                    ngram_range=(1, 2),
+                )
+                try:
+                    tfidf_matrix = vectorizer.fit_transform(comm_tweets)
+                    word_scores = np.array(tfidf_matrix.mean(axis=0)).flatten()
+                    words = np.array(vectorizer.get_feature_names_out())
+                    top_indices = word_scores.argsort()[-top_n_keywords:][::-1]
+                    top_words = words[top_indices]
+                    top_scores = word_scores[top_indices]
+                except ValueError:
+                    top_words = []
+                    top_scores = []
+            else:
+                top_words = []
+                top_scores = []
+
+            avg_attitude = community_stats.loc[community_id, "avg_attitude"]
+            attitude_label = (
+                "Pro-WFH" if avg_attitude > 0 else "Anti-WFH / Pro-RTO"
+            )
+            for rank, (word, score) in enumerate(zip(top_words, top_scores), start=1):
+                results.append(
+                    {
+                        "community": community_id,
+                        "rank": rank,
+                        "keyword": word,
+                        "tfidf_score": score,
+                        "avg_attitude": avg_attitude,
+                        "attitude_label": attitude_label,
+                    }
+                )
+
+        return pd.DataFrame(
+            results,
+            columns=[
+                "community",
+                "rank",
+                "keyword",
+                "tfidf_score",
+                "avg_attitude",
+                "attitude_label",
+            ],
+        )
+
+    @staticmethod
+    def extract_community_hashtags(
+        df_with_comm: pd.DataFrame,
+        community_stats: pd.DataFrame,
+        top_n_communities: int = 2,
+        top_n_hashtags: int = 5,
+        tweet_col: str = "tweet",
+        community_col: str = "community",
+    ) -> pd.DataFrame:
+        """Extract notebook top hashtags per top community."""
+        top_communities = community_stats.index[:top_n_communities].tolist()
+        results = []
+
+        for community_id in top_communities:
+            comm_tweets = (
+                df_with_comm[df_with_comm[community_col] == community_id][tweet_col]
+                .dropna()
+                .astype(str)
+            )
+            hashtags = comm_tweets.str.extractall(r"(#\w+)")[0].value_counts().head(
+                top_n_hashtags
+            )
+
+            for rank, (hashtag, count) in enumerate(hashtags.items(), start=1):
+                results.append(
+                    {
+                        "community": community_id,
+                        "rank": rank,
+                        "hashtag": hashtag,
+                        "count": count,
+                    }
+                )
+
+        return pd.DataFrame(
+            results,
+            columns=["community", "rank", "hashtag", "count"],
+        )
+
+    @classmethod
+    def compute_parent_echo_score_map(
+        cls,
+        graph: nx.Graph,
+        user_attitudes: pd.DataFrame,
+        user_col: str = "user_id",
+    ) -> dict[Any, float]:
+        """Compute notebook parent-community echo chamber score map."""
+        parent_ecs_map = {}
+        for community_id in user_attitudes["community"].unique():
+            sub_users = user_attitudes[user_attitudes["community"] == community_id]
+            sub_graph = graph.subgraph(sub_users[user_col].tolist())
+            sub_attitudes = dict(
+                zip(sub_users[user_col], sub_users["propagated_attitude"])
+            )
+            polarization = cls.measure_polarization(sub_attitudes)
+            homophily = cls.measure_homophily(sub_graph, sub_attitudes)
+            temp_stats = pd.DataFrame(
+                [
+                    {
+                        "avg_attitude": sub_users["propagated_attitude"].mean(),
+                        "attitude_std": sub_users["propagated_attitude"].std(),
+                    }
+                ]
+            )
+            result = cls.compute_echo_chamber_score(
+                polarization,
+                homophily,
+                sub_users["exposure_diversity"].dropna(),
+                temp_stats,
+            )
+            parent_ecs_map[community_id] = result["overall_score"]
+        return parent_ecs_map
+
+    @staticmethod
+    def compute_sub_echo_score_map(sub_echo_df: pd.DataFrame) -> dict[Any, float]:
+        """Map notebook sub-community IDs to echo chamber scores."""
+        return dict(
+            zip(sub_echo_df["sub_community"], sub_echo_df["echo_chamber_score"])
+        )
+
+    @staticmethod
+    def build_summary_metrics_table(
+        user_attitudes: pd.DataFrame,
+        tweets_df: pd.DataFrame,
+        graph: nx.Graph,
+        num_communities: int,
+        polarization_propagated: dict[str, float],
+        homophily_propagated: dict[str, float],
+        echo_chamber_metrics: dict[str, float],
+    ) -> pd.DataFrame:
+        """Return the notebook summary metrics table as data."""
+        overall_score = echo_chamber_metrics["overall_score"]
+        if overall_score < 0.3:
+            interpretation = "LOW - Limited echo chamber effects detected"
+        elif overall_score < 0.6:
+            interpretation = "MODERATE - Some echo chamber characteristics present"
+        else:
+            interpretation = "HIGH - Strong echo chamber effects detected"
+
+        summary_data = [
+            ["Metric", "Value"],
+            ["", ""],
+            ["Total Users", f"{len(user_attitudes)}"],
+            ["Total Tweets", f"{len(tweets_df)}"],
+            ["Network Edges", f"{graph.number_of_edges()}"],
+            ["Communities", f"{num_communities}"],
+            ["", ""],
+            ["Polarization", f"{polarization_propagated['variance']:.3f}"],
+            ["Assortativity", f"{homophily_propagated['assortativity']:.3f}"],
+            ["Avg Diversity", f"{user_attitudes['exposure_diversity'].mean():.3f}"],
+            ["", ""],
+            ["Echo Chamber Score", f"{echo_chamber_metrics['overall_score']:.3f}"],
+            ["Interpretation", interpretation.split(" - ")[0]],
+        ]
+        return pd.DataFrame(summary_data, columns=["Metric", "Value"])
+
+    @staticmethod
+    def low_diversity_user_report(
+        user_attitudes: pd.DataFrame,
+        graph: nx.Graph,
+        propagated_attitudes: dict[Any, float],
+        top_n: int = 10,
+        diversity_threshold: float = 0.1,
+    ) -> dict[str, pd.DataFrame | pd.Series]:
+        """Return notebook low-diversity user and community diagnostics."""
+        low_diversity_users = user_attitudes.sort_values("exposure_diversity").head(
+            top_n
+        )[
+            [
+                "user_id",
+                "mean_attitude",
+                "exposure_diversity",
+                "community",
+                "num_posts",
+            ]
+        ].copy()
+
+        def get_neighbor_stats(user_id: Any) -> tuple[float, int]:
+            neighbors = list(graph.neighbors(user_id))
+            if not neighbors:
+                return 0.0, 0
+            neighbor_attitudes = [
+                propagated_attitudes.get(neighbor, 0) for neighbor in neighbors
+            ]
+            return float(np.mean(neighbor_attitudes)), len(neighbors)
+
+        low_diversity_users[
+            ["neighbor_avg_attitude", "neighbor_count"]
+        ] = low_diversity_users["user_id"].apply(
+            lambda user_id: pd.Series(get_neighbor_stats(user_id))
+        )
+
+        low_div_comm_summary = (
+            user_attitudes[
+                user_attitudes["exposure_diversity"] < diversity_threshold
+            ]
+            .groupby("community")
+            .size()
+            .sort_values(ascending=False)
+        )
+
+        return {
+            "low_diversity_users": low_diversity_users,
+            "low_diversity_community_summary": low_div_comm_summary,
+        }
+
+    @staticmethod
     def compute_echo_chamber_score(
         polarization: dict[str, float],
         homophily: dict[str, float],

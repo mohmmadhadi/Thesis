@@ -777,6 +777,229 @@ def test_echo_chamber_analyzer_analyze_sub_communities_returns_merged_scores(
     ]
 
 
+def test_echo_chamber_analyzer_get_community_keywords_matches_notebook_map():
+    df_tweets = pd.DataFrame(
+        {
+            "community": [0, 0, 0, 1, 1, "None"],
+            "clean_text": [
+                "remote work flexibility productivity",
+                "remote work saves commute",
+                "flexibility remote teams",
+                "office commute",
+                "return office",
+                "ignored community",
+            ],
+        }
+    )
+
+    result = EchoChamberAnalyzer.get_community_keywords(
+        df_tweets,
+        "community",
+        top_n=3,
+    )
+
+    assert set(result) == {0, 1}
+    assert "remote" in result[0]
+    assert result[1] == "Insufficient data"
+
+
+def test_echo_chamber_analyzer_extract_top_keywords_and_hashtags_preserve_columns():
+    df_with_comm = pd.DataFrame(
+        {
+            "community": [0, 0, 0, 1, 1, 1, 2],
+            "clean_text": [
+                "remote work productivity",
+                "remote teams flexibility",
+                "work from home remote",
+                "office collaboration commute",
+                "return office collaboration",
+                "office work culture",
+                "small ignored",
+            ],
+            "tweet": [
+                "Remote work #WFH #AI",
+                "Flexible remote teams #WFH",
+                "Home office #Remote",
+                "Office return #RTO",
+                "Collaboration #RTO #Office",
+                "Office culture #Office",
+                "Other #Other",
+            ],
+        }
+    )
+    community_stats = pd.DataFrame(
+        {
+            "size": [3, 3, 1],
+            "avg_attitude": [0.4, -0.5, 0.1],
+            "attitude_std": [0.1, 0.2, 0.0],
+            "avg_diversity": [0.2, 0.6, 0.4],
+        },
+        index=[0, 1, 2],
+    )
+
+    keywords = EchoChamberAnalyzer.extract_top_community_keywords(
+        df_with_comm,
+        community_stats,
+        top_n_communities=2,
+        top_n_keywords=3,
+    )
+    hashtags = EchoChamberAnalyzer.extract_community_hashtags(
+        df_with_comm,
+        community_stats,
+        top_n_communities=2,
+        top_n_hashtags=2,
+    )
+
+    assert keywords.columns.tolist() == [
+        "community",
+        "rank",
+        "keyword",
+        "tfidf_score",
+        "avg_attitude",
+        "attitude_label",
+    ]
+    assert set(keywords["community"]) == {0, 1}
+    assert keywords.groupby("community").size().to_dict() == {0: 3, 1: 3}
+    assert keywords[keywords["community"] == 0]["attitude_label"].unique().tolist() == [
+        "Pro-WFH"
+    ]
+    assert keywords[keywords["community"] == 1]["attitude_label"].unique().tolist() == [
+        "Anti-WFH / Pro-RTO"
+    ]
+
+    assert hashtags.columns.tolist() == ["community", "rank", "hashtag", "count"]
+    assert set(hashtags["community"]) == {0, 1}
+    assert "#WFH" in hashtags[hashtags["community"] == 0]["hashtag"].tolist()
+    assert "#RTO" in hashtags[hashtags["community"] == 1]["hashtag"].tolist()
+
+
+def test_echo_chamber_analyzer_keyword_tables_handle_empty_and_small_communities():
+    df_with_comm = pd.DataFrame(
+        {
+            "community": [0, 1],
+            "clean_text": ["the and is", None],
+            "tweet": ["no hashtag here", None],
+        }
+    )
+    community_stats = pd.DataFrame(
+        {
+            "size": [1, 1],
+            "avg_attitude": [0.1, -0.1],
+            "attitude_std": [0.0, 0.0],
+            "avg_diversity": [0.5, 0.5],
+        },
+        index=[0, 1],
+    )
+
+    keyword_map = EchoChamberAnalyzer.get_community_keywords(
+        df_with_comm,
+        "community",
+    )
+    keywords = EchoChamberAnalyzer.extract_top_community_keywords(
+        df_with_comm,
+        community_stats,
+    )
+    hashtags = EchoChamberAnalyzer.extract_community_hashtags(
+        df_with_comm,
+        community_stats,
+    )
+
+    assert keyword_map == {0: "Insufficient data", 1: "Insufficient data"}
+    assert keywords.empty
+    assert keywords.columns.tolist() == [
+        "community",
+        "rank",
+        "keyword",
+        "tfidf_score",
+        "avg_attitude",
+        "attitude_label",
+    ]
+    assert hashtags.empty
+    assert hashtags.columns.tolist() == ["community", "rank", "hashtag", "count"]
+
+
+def test_echo_chamber_analyzer_parent_and_sub_echo_score_maps_preserve_ids():
+    graph = nx.Graph()
+    graph.add_edges_from([(1, 2), (3, 4)])
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4],
+            "community": [0, 0, 1, 1],
+            "propagated_attitude": [0.4, 0.6, -0.4, -0.6],
+            "exposure_diversity": [0.2, 0.2, 0.7, 0.7],
+        }
+    )
+    sub_echo_df = pd.DataFrame(
+        {
+            "sub_community": ["0_0", "1_0"],
+            "echo_chamber_score": [0.6, 0.4],
+        }
+    )
+
+    parent_map = EchoChamberAnalyzer.compute_parent_echo_score_map(
+        graph,
+        user_attitudes,
+    )
+    sub_map = EchoChamberAnalyzer.compute_sub_echo_score_map(sub_echo_df)
+
+    assert set(parent_map) == {0, 1}
+    assert all(isinstance(value, float) for value in parent_map.values())
+    assert sub_map == {"0_0": 0.6, "1_0": 0.4}
+
+
+def test_echo_chamber_analyzer_summary_and_low_diversity_reports_match_notebook_fields():
+    graph = nx.Graph()
+    graph.add_edges_from([(1, 2), (1, 3)])
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3],
+            "mean_attitude": [0.5, 0.4, -0.3],
+            "exposure_diversity": [0.05, 0.2, 0.08],
+            "community": [0, 0, 1],
+            "num_posts": [3, 2, 1],
+        }
+    )
+    tweets = pd.DataFrame({"id": [10, 11, 12]})
+    propagated = {1: 0.5, 2: 0.4, 3: -0.3}
+
+    summary = EchoChamberAnalyzer.build_summary_metrics_table(
+        user_attitudes,
+        tweets,
+        graph,
+        num_communities=2,
+        polarization_propagated={"variance": 0.2},
+        homophily_propagated={"assortativity": 0.3},
+        echo_chamber_metrics={"overall_score": 0.65},
+    )
+    report = EchoChamberAnalyzer.low_diversity_user_report(
+        user_attitudes,
+        graph,
+        propagated,
+        top_n=2,
+        diversity_threshold=0.1,
+    )
+
+    assert summary.columns.tolist() == ["Metric", "Value"]
+    assert summary.values.tolist()[0] == ["Metric", "Value"]
+    assert ["Total Users", "3"] in summary.values.tolist()
+    assert ["Network Edges", "2"] in summary.values.tolist()
+    assert ["Interpretation", "HIGH"] in summary.values.tolist()
+
+    low_users = report["low_diversity_users"]
+    assert low_users.columns.tolist() == [
+        "user_id",
+        "mean_attitude",
+        "exposure_diversity",
+        "community",
+        "num_posts",
+        "neighbor_avg_attitude",
+        "neighbor_count",
+    ]
+    assert low_users["user_id"].tolist() == [1, 3]
+    assert low_users.loc[low_users["user_id"] == 1, "neighbor_count"].iloc[0] == 2
+    assert report["low_diversity_community_summary"].to_dict() == {0: 1, 1: 1}
+
+
 def test_echo_chamber_analyzer_compute_echo_chamber_score_matches_notebook_weights():
     polarization = {"variance": 0.25, "bimodality": 0.35, "inter_group_distance": 0.75}
     homophily = {"assortativity": 0.4, "homophily_ratio": 0.6}
