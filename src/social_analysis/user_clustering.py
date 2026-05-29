@@ -45,6 +45,7 @@ CLUSTER_FEATURES = [
 ]
 PERSONALITY_TRAITS = ["ex", "oe", "co", "ag", "ne"]
 DEMOGRAPHIC_TRAITS = ["gender", "leaning", "age", "education_level"]
+USER_METADATA_COLUMNS = ["id"] + PERSONALITY_TRAITS + DEMOGRAPHIC_TRAITS
 
 
 class FeatureExtractor:
@@ -584,6 +585,47 @@ class UserClusterer:
     def initialize_agents(user_info: pd.DataFrame) -> pd.DataFrame:
         """Copy user demographic/personality rows as the agent base table."""
         return user_info.copy()
+
+    @staticmethod
+    def prepare_user_metadata(
+        user_info: pd.DataFrame,
+        columns: list[str] | None = None,
+        drop_header_artifact: bool = True,
+    ) -> pd.DataFrame:
+        """Clean user metadata using the notebook's row-drop and column selection."""
+        if "id" not in user_info.columns:
+            raise ValueError("user_info must contain an 'id' column.")
+
+        result = user_info.copy()
+        if drop_header_artifact and len(result) > 0:
+            result = result.drop(result.index[0]).reset_index(drop=True)
+
+        selected_columns = [
+            column for column in (columns or USER_METADATA_COLUMNS) if column in result.columns
+        ]
+        if "id" not in selected_columns:
+            selected_columns = ["id"] + selected_columns
+        return result[selected_columns].copy()
+
+    @staticmethod
+    def merge_user_metadata_into_tweets(
+        tweets: pd.DataFrame,
+        user_info: pd.DataFrame,
+        user_col: str = "user_id",
+        tweet_id_col: str = "id",
+        prepared_user_info: bool = False,
+    ) -> pd.DataFrame:
+        """Merge notebook user metadata onto tweets before tweet clustering."""
+        if user_col not in tweets.columns:
+            raise ValueError(f"tweets must contain a '{user_col}' column.")
+
+        metadata = (
+            user_info.copy()
+            if prepared_user_info
+            else UserClusterer.prepare_user_metadata(user_info)
+        )
+        raw = tweets.rename(columns={tweet_id_col: "tweet_id"})
+        return raw.merge(metadata.set_index("id"), left_on=user_col, right_index=True)
 
     @staticmethod
     def add_length_features(

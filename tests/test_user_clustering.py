@@ -373,6 +373,111 @@ def test_user_clustering_visualizer_trait_methods_skip_missing_columns(tmp_path)
     assert visualizer.save_trait_visualizations_html(tweets, ["ex"], tmp_path) == []
 
 
+def test_user_clusterer_prepare_user_metadata_drops_header_artifact_and_selects_columns():
+    user_info = pd.DataFrame(
+        {
+            "id": ["id", 1, 2],
+            "ex": ["ex", "high", "low"],
+            "oe": ["oe", "open", "closed"],
+            "co": ["co", "high", "low"],
+            "ag": ["ag", "low", "high"],
+            "ne": ["ne", "mid", "low"],
+            "gender": ["gender", "f", "m"],
+            "leaning": ["leaning", "left", "right"],
+            "age": ["age", 20, 30],
+            "education_level": ["education_level", "ba", "ma"],
+            "unused": ["unused", "x", "y"],
+        }
+    )
+
+    result = UserClusterer.prepare_user_metadata(user_info)
+
+    assert result["id"].tolist() == [1, 2]
+    assert result.columns.tolist() == [
+        "id",
+        "ex",
+        "oe",
+        "co",
+        "ag",
+        "ne",
+        "gender",
+        "leaning",
+        "age",
+        "education_level",
+    ]
+    assert "unused" not in result.columns
+
+
+def test_user_clusterer_prepare_user_metadata_handles_missing_optional_traits():
+    user_info = pd.DataFrame(
+        {
+            "id": ["id", 1],
+            "ex": ["ex", "high"],
+            "gender": ["gender", "f"],
+        }
+    )
+
+    result = UserClusterer.prepare_user_metadata(user_info)
+
+    assert result.columns.tolist() == ["id", "ex", "gender"]
+    assert result.loc[0, "ex"] == "high"
+
+
+def test_user_clusterer_merge_user_metadata_into_tweets_matches_notebook_flow():
+    tweets = pd.DataFrame(
+        {
+            "id": [10, 11, 12],
+            "user_id": [1, 2, 3],
+            "tweet": ["a", "b", "c"],
+        }
+    )
+    user_info = pd.DataFrame(
+        {
+            "id": ["id", 1, 2],
+            "ex": ["ex", "high", "low"],
+            "oe": ["oe", "open", "closed"],
+            "gender": ["gender", "f", "m"],
+        }
+    )
+
+    result = UserClusterer.merge_user_metadata_into_tweets(tweets, user_info)
+
+    assert result["tweet_id"].tolist() == [10, 11]
+    assert "id" not in result.columns
+    assert result["user_id"].tolist() == [1, 2]
+    assert result["ex"].tolist() == ["high", "low"]
+    assert result["oe"].tolist() == ["open", "closed"]
+    assert result["gender"].tolist() == ["f", "m"]
+
+
+def test_user_clusterer_merge_prepared_metadata_preserves_trait_columns_for_visuals():
+    tweets = pd.DataFrame(
+        {
+            "id": [10],
+            "user_id": [1],
+            "tweet": ["hello"],
+        }
+    )
+    prepared_user_info = pd.DataFrame(
+        {
+            "id": [1],
+            "ex": ["high"],
+            "oe": ["open"],
+            "co": ["high"],
+            "ag": ["low"],
+            "ne": ["mid"],
+        }
+    )
+
+    result = UserClusterer.merge_user_metadata_into_tweets(
+        tweets,
+        prepared_user_info,
+        prepared_user_info=True,
+    )
+
+    assert {"ex", "oe", "co", "ag", "ne"}.issubset(result.columns)
+
+
 def test_user_clusterer_add_length_features_matches_notebook_names():
     agents = pd.DataFrame({"id": [1, 2]})
     tweets = pd.DataFrame({"user_id": [1, 1, 2], "tweet": ["aa", "aaaa", "bbb"]})

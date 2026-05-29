@@ -50,26 +50,33 @@ def main() -> None:
             raise FileNotFoundError(f"Expected input not found: {path}. Run {upstream} first.")
 
     raw_tweets = loader.load_csv(tweets_path)
-    user_info = loader.load_csv(user_demo_path)
+    user_info = UserClusterer.prepare_user_metadata(loader.load_csv(user_demo_path))
     sentiments = loader.load_csv(sentiment_path)
     reply_sim = loader.load_csv(coherence_path)
 
     text_col = config["columns"]["text"]
+    tweets = UserClusterer.merge_user_metadata_into_tweets(
+        raw_tweets,
+        user_info,
+        user_col=config["columns"]["user_id"],
+        tweet_id_col=config["columns"]["id"],
+        prepared_user_info=True,
+    )
     tweet_clusterer = TweetClusterer()
-    tweet_clusters = tweet_clusterer.fit_transform(raw_tweets, text_col=text_col)
+    tweet_clusters = tweet_clusterer.fit_transform(tweets, text_col=text_col)
 
     user_clusterer = UserClusterer()
     agents = user_clusterer.initialize_agents(user_info)
-    agents = user_clusterer.add_length_features(agents, raw_tweets, text_col=text_col)
+    agents = user_clusterer.add_length_features(agents, tweets, text_col=text_col)
     agents = user_clusterer.add_sentiment_features(agents, sentiments)
-    agents = user_clusterer.add_text_feature_aggregates(agents, raw_tweets, text_col=text_col)
+    agents = user_clusterer.add_text_feature_aggregates(agents, tweets, text_col=text_col)
     if tweet_clusterer.embeddings is not None:
         agents = user_clusterer.add_user_tweet_cosine(
             agents,
             tweet_clusters,
             tweet_clusterer.embeddings,
         )
-    agents = user_clusterer.add_rate_features(agents, raw_tweets, text_col=text_col)
+    agents = user_clusterer.add_rate_features(agents, tweets, text_col=text_col)
     agents = user_clusterer.add_reply_coherence(agents, reply_sim)
     agent_clusters = user_clusterer.fit_transform_agents(agents)
     if user_clusterer.x_2d_ is not None:
