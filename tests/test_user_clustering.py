@@ -274,6 +274,68 @@ def test_tweet_clusterer_fit_transform_adds_coordinates_clusters_and_labels():
     assert clusterer.n_noise_ == 1
 
 
+def test_tweet_clusterer_cluster_count_summary_counts_noise_like_notebook():
+    tweets = pd.DataFrame({"cluster": [0, 0, 1, -1, -1]})
+
+    result = TweetClusterer.cluster_count_summary(tweets)
+
+    assert result == {"n_clusters": 2, "n_noise": 2}
+
+
+def test_tweet_clusterer_cluster_trait_crosstab_returns_counts_percent_annotations():
+    tweets = pd.DataFrame(
+        {
+            "cluster": [0, 0, 1, 1, -1],
+            "cluster_label": ["A", "A", "B", "B", "Noise"],
+            "ex": ["high", "low", "high", "high", "low"],
+        }
+    )
+
+    result = TweetClusterer.cluster_trait_crosstab(tweets, "ex")
+
+    assert set(result) == {"counts", "row_percent", "annotation"}
+    assert result["counts"].index.tolist() == ["A", "B"]
+    assert result["counts"].columns.tolist() == ["high", "low"]
+    assert result["counts"].loc["A", "high"] == 1
+    assert result["row_percent"].loc["B", "high"] == pytest.approx(1.0)
+    assert result["annotation"].loc["A", "high"] == "1<br>(50%)"
+
+
+def test_tweet_clusterer_overlap_diagnostics_returns_ari_nmi_and_missing_trait():
+    tweets = pd.DataFrame(
+        {
+            "cluster": [0, 0, 1, 1, -1],
+            "cluster_label": ["A", "A", "B", "B", "Noise"],
+            "ex": ["high", "low", "high", "low", "low"],
+        }
+    )
+
+    result = TweetClusterer.cluster_trait_overlap_diagnostics(
+        tweets,
+        traits=["ex", "missing_trait"],
+    )
+
+    assert result.columns.tolist() == [
+        "trait",
+        "chi2",
+        "p",
+        "dof",
+        "significance",
+        "ari",
+        "nmi",
+        "ari_nmi_status",
+        "n_values",
+    ]
+    ex_row = result[result["trait"] == "ex"].iloc[0]
+    missing_row = result[result["trait"] == "missing_trait"].iloc[0]
+    assert ex_row["ari_nmi_status"] == "computed"
+    assert pd.notna(ex_row["ari"])
+    assert pd.notna(ex_row["nmi"])
+    assert missing_row["significance"] == "missing"
+    assert missing_row["ari_nmi_status"] == "missing"
+    assert missing_row["n_values"] == 0
+
+
 def test_user_clusterer_add_length_features_matches_notebook_names():
     agents = pd.DataFrame({"id": [1, 2]})
     tweets = pd.DataFrame({"user_id": [1, 1, 2], "tweet": ["aa", "aaaa", "bbb"]})
@@ -358,6 +420,28 @@ def test_user_clusterer_prepare_clustering_matrix_selects_features_and_drops_na(
     ]
 
 
+def test_user_clusterer_clustering_matrix_summary_reports_shape_and_dropped_agents():
+    clusterer = UserClusterer()
+    agents = pd.DataFrame(
+        {
+            "mean_sent": [0.1, 0.2],
+            "std_emo": [0.0, 0.1],
+            "mtld": [5.0, None],
+            "pronoun_ratio": [1.0, 2.0],
+            "mean_emoji_rate": [0.0, 0.1],
+            "avg_reply_coherence": [0.5, 0.6],
+            "has_parent": [1, 0],
+        }
+    )
+
+    result = clusterer.clustering_matrix_summary(agents)
+
+    assert result["shape"] == (1, 7)
+    assert result["dropped_agents"] == 1
+    assert result["cluster_features"] == clusterer.selected_features_
+    assert result["matrix"].shape == (1, 7)
+
+
 def test_user_clusterer_fit_clusters_uses_injected_components():
     clusterer = UserClusterer(
         scaler=FakeScaler(),
@@ -392,6 +476,19 @@ def test_user_clusterer_assign_cluster_labels_uses_matrix_index():
     assert result["hdbscan_cluster"].tolist() == [1, -1]
 
 
+def test_user_clusterer_agent_cluster_count_summary_counts_noise():
+    result = UserClusterer.agent_cluster_count_summary(
+        labels_gmm=pd.Series([0, 1, 1]).to_numpy(),
+        labels_hdbscan=pd.Series([2, -1, 2]).to_numpy(),
+    )
+
+    assert result == {
+        "gmm_clusters": 2,
+        "hdbscan_clusters": 1,
+        "hdbscan_noise": 1,
+    }
+
+
 def test_user_clusterer_profile_clusters_returns_crosstab_and_binary_metrics():
     agents = pd.DataFrame(
         {
@@ -420,3 +517,57 @@ def test_user_clusterer_profile_clusters_describes_numeric_trait_with_many_value
     profile = UserClusterer.profile_clusters(agents, "age")
 
     assert "describe" in profile
+
+
+def test_user_clusterer_profile_held_out_traits_skips_missing_and_preserves_profiles():
+    agents = pd.DataFrame(
+        {
+            "Agent_Cluster": [0, 0, 1, 1],
+            "gender": ["f", "m", "f", "m"],
+            "age": [20, 21, 22, 23],
+        }
+    )
+
+    result = UserClusterer.profile_held_out_traits(
+        agents,
+        traits=["gender", "missing_trait", "age"],
+    )
+
+    assert set(result) == {"gender", "age"}
+    assert "crosstab" in result["gender"]
+    assert "crosstab" in result["age"]
+
+
+def test_user_clusterer_behavioral_correlation_matrix_uses_existing_behavior_cols():
+    agents = pd.DataFrame(
+        {
+            "mean_len": [1.0, 2.0, 3.0],
+            "mean_sent": [0.1, 0.2, 0.3],
+            "notebook_ignored": [10, 11, 12],
+        }
+    )
+
+    result = UserClusterer.behavioral_correlation_matrix(agents)
+
+    assert result.index.tolist() == ["mean_len", "mean_sent"]
+    assert result.columns.tolist() == ["mean_len", "mean_sent"]
+    assert result.loc["mean_len", "mean_sent"] == pytest.approx(1.0)
+
+
+def test_user_clusterer_cluster_profile_summary_returns_mean_features():
+    agents = pd.DataFrame(
+        {
+            "Agent_Cluster": [0, 0, 1],
+            "mean_sent": [0.2, 0.4, -0.5],
+            "mtld": [10.0, 20.0, 30.0],
+        }
+    )
+
+    result = UserClusterer.cluster_profile_summary(
+        agents,
+        feature_cols=["mean_sent", "mtld", "missing_feature"],
+    )
+
+    assert result.columns.tolist() == ["mean_sent", "mtld"]
+    assert result.loc[0, "mean_sent"] == pytest.approx(0.3)
+    assert result.loc[1, "mtld"] == pytest.approx(30.0)

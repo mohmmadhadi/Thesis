@@ -43,6 +43,8 @@ CLUSTER_FEATURES = [
     "avg_reply_coherence",
     "has_parent",
 ]
+PERSONALITY_TRAITS = ["ex", "oe", "co", "ag", "ne"]
+DEMOGRAPHIC_TRAITS = ["gender", "leaning", "age", "education_level"]
 
 
 class FeatureExtractor:
@@ -359,6 +361,141 @@ class TweetClusterer:
         result["cluster_label"] = result["cluster"].map(labels)
         return result
 
+    @staticmethod
+    def cluster_count_summary(
+        tweets: pd.DataFrame,
+        cluster_col: str = "cluster",
+    ) -> dict[str, int]:
+        """Return notebook tweet cluster and noise counts."""
+        n_clusters = tweets[cluster_col].nunique() - (
+            1 if -1 in tweets[cluster_col].values else 0
+        )
+        n_noise = int((tweets[cluster_col] == -1).sum())
+        return {"n_clusters": int(n_clusters), "n_noise": n_noise}
+
+    @staticmethod
+    def cluster_trait_crosstab(
+        tweets: pd.DataFrame,
+        trait: str,
+        cluster_label_col: str = "cluster_label",
+        cluster_col: str = "cluster",
+        include_noise: bool = False,
+    ) -> dict[str, pd.DataFrame]:
+        """Return notebook cluster-by-trait counts, row percentages, and labels."""
+        if trait not in tweets.columns:
+            return {}
+        data = tweets.copy()
+        if not include_noise:
+            data = data[data[cluster_col] != -1].copy()
+
+        counts = pd.crosstab(data[cluster_label_col], data[trait])
+        row_percent = counts.div(counts.sum(axis=1), axis=0).fillna(0)
+        annotation = counts.copy().astype(str)
+        for row_label in counts.index:
+            total = counts.loc[row_label].sum()
+            for column in counts.columns:
+                value = counts.loc[row_label, column]
+                annotation.loc[row_label, column] = (
+                    f"{value}<br>({value / total:.0%})" if total > 0 else "0"
+                )
+        return {
+            "counts": counts,
+            "row_percent": row_percent,
+            "annotation": annotation,
+        }
+
+    @staticmethod
+    def cluster_trait_overlap_diagnostics(
+        tweets: pd.DataFrame,
+        traits: list[str] | None = None,
+        cluster_col: str = "cluster",
+        cluster_label_col: str = "cluster_label",
+        include_noise: bool = False,
+    ) -> pd.DataFrame:
+        """Compute notebook chi-square, ARI, and NMI diagnostics per trait."""
+        from scipy.stats import chi2_contingency
+        from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+
+        selected_traits = traits or PERSONALITY_TRAITS
+        data = tweets.copy()
+        if not include_noise:
+            data = data[data[cluster_col] != -1].copy()
+
+        rows = []
+        for trait in selected_traits:
+            if trait not in data.columns:
+                rows.append(
+                    {
+                        "trait": trait,
+                        "chi2": np.nan,
+                        "p": np.nan,
+                        "dof": np.nan,
+                        "significance": "missing",
+                        "ari": np.nan,
+                        "nmi": np.nan,
+                        "ari_nmi_status": "missing",
+                        "n_values": 0,
+                    }
+                )
+                continue
+
+            trait_data = data[[cluster_label_col, cluster_col, trait]].dropna()
+            unique_vals = trait_data[trait].unique()
+            row = {
+                "trait": trait,
+                "chi2": np.nan,
+                "p": np.nan,
+                "dof": np.nan,
+                "significance": "not computed",
+                "ari": np.nan,
+                "nmi": np.nan,
+                "ari_nmi_status": (
+                    f"skipped (trait has {len(unique_vals)} values, need 2)"
+                ),
+                "n_values": len(unique_vals),
+            }
+
+            crosstab = pd.crosstab(trait_data[cluster_label_col], trait_data[trait])
+            if crosstab.shape[0] > 0 and crosstab.shape[1] > 0:
+                chi2, p_value, dof, _ = chi2_contingency(crosstab)
+                row.update(
+                    {
+                        "chi2": float(chi2),
+                        "p": float(p_value),
+                        "dof": int(dof),
+                        "significance": (
+                            "SIGNIFICANT (p < 0.05)"
+                            if p_value < 0.05
+                            else "not significant (p >= 0.05)"
+                        ),
+                    }
+                )
+
+            if len(unique_vals) == 2:
+                label_map = {value: idx for idx, value in enumerate(unique_vals)}
+                encoded = trait_data[trait].map(label_map)
+                row["ari"] = float(adjusted_rand_score(encoded, trait_data[cluster_col]))
+                row["nmi"] = float(
+                    normalized_mutual_info_score(encoded, trait_data[cluster_col])
+                )
+                row["ari_nmi_status"] = "computed"
+            rows.append(row)
+
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "trait",
+                "chi2",
+                "p",
+                "dof",
+                "significance",
+                "ari",
+                "nmi",
+                "ari_nmi_status",
+                "n_values",
+            ],
+        )
+
 
 class UserClusterer:
     """Build agent feature matrices and run notebook-style user clustering."""
@@ -559,6 +696,19 @@ class UserClusterer:
         self.agents_cluster_df_ = matrix
         return matrix
 
+    def clustering_matrix_summary(
+        self,
+        agents: pd.DataFrame,
+    ) -> dict[str, Any]:
+        """Return notebook feature matrix shape and dropped-agent count."""
+        matrix = self.prepare_clustering_matrix(agents)
+        return {
+            "matrix": matrix,
+            "shape": matrix.shape,
+            "dropped_agents": len(agents) - len(matrix),
+            "cluster_features": self.selected_features_,
+        }
+
     def _build_scaler(self) -> Any:
         from sklearn.preprocessing import StandardScaler
 
@@ -621,6 +771,21 @@ class UserClusterer:
         return self.labels_gmm_, self.labels_hdbscan_, self.x_pca_, self.x_2d_
 
     @staticmethod
+    def agent_cluster_count_summary(
+        labels_gmm: np.ndarray,
+        labels_hdbscan: np.ndarray,
+    ) -> dict[str, int]:
+        """Return notebook GMM/HDBSCAN cluster and noise counts."""
+        labels_hdbscan_array = np.asarray(labels_hdbscan)
+        return {
+            "gmm_clusters": int(len(set(labels_gmm))),
+            "hdbscan_clusters": int(
+                len(set(labels_hdbscan)) - (1 if -1 in labels_hdbscan else 0)
+            ),
+            "hdbscan_noise": int((labels_hdbscan_array == -1).sum()),
+        }
+
+    @staticmethod
     def assign_cluster_labels(
         agents: pd.DataFrame,
         agents_cluster_df: pd.DataFrame,
@@ -681,6 +846,68 @@ class UserClusterer:
         return {
             "describe": agents_with_clusters.groupby(cluster_col)[trait].describe().round(3)
         }
+
+    @staticmethod
+    def profile_held_out_traits(
+        agents_with_clusters: pd.DataFrame,
+        traits: list[str] | None = None,
+        cluster_col: str = "Agent_Cluster",
+    ) -> dict[str, dict[str, Any]]:
+        """Profile notebook held-out personality and demographic traits."""
+        selected_traits = traits or (PERSONALITY_TRAITS + DEMOGRAPHIC_TRAITS)
+        return {
+            trait: UserClusterer.profile_clusters(
+                agents_with_clusters,
+                trait,
+                cluster_col=cluster_col,
+            )
+            for trait in selected_traits
+            if trait in agents_with_clusters.columns
+        }
+
+    @staticmethod
+    def behavioral_correlation_matrix(
+        agents: pd.DataFrame,
+        behavior_cols: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """Return notebook behavioural feature correlation matrix."""
+        default_cols = [
+            "mean_len",
+            "std_len",
+            "mean_sent",
+            "std_sent",
+            "mean_emo",
+            "std_emo",
+            "mtld",
+            "entropy",
+            "pronoun_ratio",
+            "avg_sent_length",
+            "readability_score",
+            "exclamation_freq",
+            "ellipsis_freq",
+            "avg_tweet_cosine_similarity",
+            "mean_emoji_rate",
+            "mean_punct_rate",
+            "avg_reply_coherence",
+        ]
+        selected_cols = [
+            column for column in (behavior_cols or default_cols) if column in agents.columns
+        ]
+        return agents[selected_cols].corr()
+
+    @staticmethod
+    def cluster_profile_summary(
+        agents_with_clusters: pd.DataFrame,
+        feature_cols: list[str],
+        cluster_col: str = "Agent_Cluster",
+    ) -> pd.DataFrame:
+        """Summarize behavioural features by agent cluster."""
+        selected_features = [
+            feature for feature in feature_cols if feature in agents_with_clusters.columns
+        ]
+        if not selected_features:
+            return pd.DataFrame()
+        return agents_with_clusters.groupby(cluster_col)[selected_features].mean().round(3)
 
     def fit_transform_agents(
         self,
