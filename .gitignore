@@ -16,11 +16,16 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# Data and outputs
-data/raw/
-data/processed/
-data/outputs/
-reference_outputs/
+# Ignore data files
+data/raw/*
+data/outputs/*
+data/processed/*
+
+# Keep folder structure
+!data/.gitkeep
+!data/raw/.gitkeep
+!data/outputs/.gitkeep
+!data/processed/.gitkeep
 
 # Models / large artifacts
 *.pkl

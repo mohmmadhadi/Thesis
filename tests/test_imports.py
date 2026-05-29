@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 @pytest.mark.parametrize(
     "module_name",
     [
+        "social_analysis",
         "social_analysis.config",
         "social_analysis.data_loader",
         "social_analysis.preprocessing",
