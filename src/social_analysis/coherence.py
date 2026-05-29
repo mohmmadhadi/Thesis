@@ -41,6 +41,23 @@ KEEP_COLUMNS = [
     "flag_consensus",
 ]
 
+SCORE_COLUMNS = ["cosine_similarity", "bs_f1", "cross_encoder_score"]
+FLAG_COLUMNS = {
+    "cosine_similarity": "flag_low_cosine",
+    "bs_f1": "flag_low_bertscore",
+    "cross_encoder_score": "flag_low_crossenc",
+}
+THRESHOLDS = {
+    "cosine_similarity": COSINE_LOW_THRESHOLD,
+    "bs_f1": BERTSCORE_LOW_THRESHOLD,
+    "cross_encoder_score": CROSS_ENC_LOW_THRESHOLD,
+}
+METRIC_LABELS = {
+    "cosine_similarity": "Cosine Similarity",
+    "bs_f1": "BERTScore F1",
+    "cross_encoder_score": "Cross-Encoder Score",
+}
+
 
 class CoherenceScorer:
     """Score reply coherence with embeddings, BERTScore, and a cross-encoder."""
@@ -194,6 +211,152 @@ class CoherenceScorer:
         summary["composite_coherence"] = self.compute_composite_coherence(summary)
         summary.sort_values("composite_coherence", ascending=True, inplace=True)
         return summary
+
+    @staticmethod
+    def score_descriptive_stats(results: pd.DataFrame) -> pd.DataFrame:
+        """Return notebook score distribution describe table."""
+        rows = []
+        for column in SCORE_COLUMNS:
+            if column not in results.columns:
+                continue
+            stats = results[column].describe().round(4).to_dict()
+            stats["metric"] = column
+            stats["label"] = METRIC_LABELS[column]
+            rows.append(stats)
+        ordered_cols = ["metric", "label", "count", "mean", "std", "min", "25%", "50%", "75%", "max"]
+        return pd.DataFrame(rows)[ordered_cols] if rows else pd.DataFrame(columns=ordered_cols)
+
+    @staticmethod
+    def threshold_failure_counts(results: pd.DataFrame) -> pd.DataFrame:
+        """Return notebook below-threshold counts per metric."""
+        rows = []
+        for column in SCORE_COLUMNS:
+            if column not in results.columns:
+                continue
+            flag_col = FLAG_COLUMNS[column]
+            if flag_col in results.columns:
+                count = int(results[flag_col].sum())
+            else:
+                count = int((results[column] < THRESHOLDS[column]).sum())
+            total = int(results[column].notna().sum())
+            rows.append(
+                {
+                    "metric": column,
+                    "label": METRIC_LABELS[column],
+                    "threshold": THRESHOLDS[column],
+                    "below_threshold": count,
+                    "total": total,
+                    "pct_below_threshold": (count / total * 100) if total else 0.0,
+                }
+            )
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "metric",
+                "label",
+                "threshold",
+                "below_threshold",
+                "total",
+                "pct_below_threshold",
+            ],
+        )
+
+    @staticmethod
+    def thread_summary_examples(
+        summary: pd.DataFrame,
+        n: int = 10,
+    ) -> dict[str, pd.DataFrame]:
+        """Return notebook least/most coherent thread summary tables."""
+        cols = [
+            "thread_id",
+            "n_replies",
+            "composite_coherence",
+            "mean_cosine",
+            "mean_bertscore_f1",
+            "mean_cross_encoder",
+            "pct_flagged_consensus",
+        ]
+        available = [column for column in cols if column in summary.columns]
+        return {
+            "least_coherent_threads": summary[available].head(n).copy(),
+            "most_coherent_threads": summary[available].tail(n).copy(),
+        }
+
+    @staticmethod
+    def flagged_reply_examples(
+        results: pd.DataFrame,
+        n: int = 5,
+    ) -> pd.DataFrame:
+        """Return notebook sample flagged replies table."""
+        cols = [
+            "id",
+            "thread_id",
+            "root_tweet",
+            "tweet",
+            "cosine_similarity",
+            "bs_f1",
+            "cross_encoder_score",
+        ]
+        available = [column for column in cols if column in results.columns]
+        if "flag_consensus" not in results.columns:
+            return pd.DataFrame(columns=available)
+        return results[results["flag_consensus"]].head(n)[available].copy()
+
+    @staticmethod
+    def coherence_decay_table(results: pd.DataFrame) -> pd.DataFrame:
+        """Return notebook per-round mean/std/count table for plot 3."""
+        metrics = [column for column in SCORE_COLUMNS if column in results.columns]
+        if "round" not in results.columns or not metrics:
+            return pd.DataFrame()
+        agg = results.groupby("round")[metrics].agg(["mean", "std", "count"]).reset_index()
+        agg.columns = ["round"] + [
+            f"{metric}_{stat}" for metric in metrics for stat in ["mean", "std", "count"]
+        ]
+        return agg
+
+    @staticmethod
+    def thread_heatmap_pivot(
+        results: pd.DataFrame,
+        max_threads: int = 50,
+        max_rounds: int = 10,
+    ) -> pd.DataFrame:
+        """Return notebook composite coherence heatmap pivot."""
+        required = {"thread_id", "round", "cosine_similarity", "bs_f1", "cross_encoder_score"}
+        if not required.issubset(results.columns):
+            return pd.DataFrame()
+        data = results.copy()
+        data["bs_norm"] = ((data["bs_f1"] - 0.7) / 0.3).clip(0, 1)
+        data["composite"] = (
+            data["cosine_similarity"] + data["bs_norm"] + data["cross_encoder_score"]
+        ) / 3
+        pivot = (
+            data[data["round"] <= max_rounds]
+            .groupby(["thread_id", "round"])[["composite"]]
+            .mean()
+            .unstack("round")
+        )
+        pivot.columns = pivot.columns.droplevel(0)
+        pivot = pivot.loc[pivot.mean(axis=1).sort_values().index]
+        if len(pivot) > max_threads:
+            half = max_threads // 2
+            pivot = pd.concat([pivot.head(half), pivot.tail(half)])
+        return pivot
+
+    @classmethod
+    def diagnostics_report(
+        cls,
+        results: pd.DataFrame,
+        summary: pd.DataFrame,
+    ) -> dict[str, pd.DataFrame]:
+        """Return notebook diagnostic report tables."""
+        examples = cls.thread_summary_examples(summary)
+        return {
+            "score_descriptive_stats": cls.score_descriptive_stats(results),
+            "threshold_failure_counts": cls.threshold_failure_counts(results),
+            "least_coherent_threads": examples["least_coherent_threads"],
+            "most_coherent_threads": examples["most_coherent_threads"],
+            "flagged_reply_examples": cls.flagged_reply_examples(results),
+        }
 
     def score_dataframe(self, replies: pd.DataFrame) -> pd.DataFrame:
         """Run all notebook coherence scorers and flags on prepared pairs."""

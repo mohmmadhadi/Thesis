@@ -11,7 +11,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from social_analysis.coherence import ResponseCoherencePipeline
+from social_analysis.coherence import CoherenceScorer, ResponseCoherencePipeline
 from social_analysis.config import Config
 from social_analysis.data_loader import DataLoader
 from social_analysis.visualization import CoherenceVisualizer
@@ -53,6 +53,17 @@ def main() -> None:
     loader.save_dataframe(summary, processed_dir / "coherence_summary.csv")
     loader.save_dataframe(results, tables_dir / "coherence_results.csv")
     loader.save_dataframe(summary, tables_dir / "coherence_summary.csv")
+    reports = CoherenceScorer.diagnostics_report(results, summary)
+    for name, table in reports.items():
+        loader.save_dataframe(table, tables_dir / f"{name}.csv")
+    loader.save_dataframe(
+        CoherenceScorer.coherence_decay_table(results),
+        tables_dir / "coherence_decay_by_round.csv",
+    )
+    loader.save_dataframe(
+        CoherenceScorer.thread_heatmap_pivot(results),
+        tables_dir / "thread_heatmap_pivot.csv",
+    )
     CoherenceVisualizer().plot_all(results, plots_dir)
 
 

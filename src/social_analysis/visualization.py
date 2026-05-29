@@ -679,6 +679,28 @@ class SentimentEmotionVisualizer:
 class CoherenceVisualizer:
     """Reusable response coherence plots from notebook 04."""
 
+    C_TEAL = "#1D9E75"
+    C_PURPLE = "#7F77DD"
+    C_CORAL = "#D85A30"
+    C_TEAL_L = "#9FE1CB"
+    C_PURPLE_L = "#AFA9EC"
+    C_CORAL_L = "#F0997B"
+    C_RED = "#E24B4A"
+    C_GRAY = "#888780"
+    C_BG = "#FAFAF8"
+    C_GRID = "#EEECEA"
+
+    METRIC_COLORS = {
+        "cosine_similarity": (C_TEAL, C_TEAL_L, 0.25, (0.0, 1.0)),
+        "bs_f1": (C_PURPLE, C_PURPLE_L, 0.85, (0.7, 1.0)),
+        "cross_encoder_score": (C_CORAL, C_CORAL_L, 0.50, (0.0, 1.0)),
+    }
+    METRIC_LABELS = {
+        "cosine_similarity": "Cosine similarity",
+        "bs_f1": "BERTScore F1",
+        "cross_encoder_score": "Cross-encoder",
+    }
+
     @staticmethod
     def _prepare_out_dir(out_dir: str | Path) -> Path:
         path = Path(out_dir)
@@ -689,104 +711,306 @@ class CoherenceVisualizer:
     def _score_columns(df: pd.DataFrame) -> list[str]:
         return [col for col in ["cosine_similarity", "bs_f1", "cross_encoder_score"] if col in df.columns]
 
-    def plot_score_distributions(self, results: pd.DataFrame, out_dir: str | Path) -> Path | None:
-        """Plot coherence score distributions with notebook thresholds."""
-        cols = self._score_columns(results)
-        if not cols:
-            return None
+    @classmethod
+    def _apply_style(cls) -> None:
         import matplotlib.pyplot as plt
 
-        thresholds = {"cosine_similarity": 0.25, "bs_f1": 0.85, "cross_encoder_score": 0.50}
-        labels = {"cosine_similarity": "Cosine Similarity", "bs_f1": "BERTScore F1", "cross_encoder_score": "Cross-Encoder Score"}
-        fig, axes = plt.subplots(1, len(cols), figsize=(5 * len(cols), 4), squeeze=False)
-        for ax, col in zip(axes[0], cols):
+        plt.rcParams.update(
+            {
+                "font.family": "DejaVu Sans",
+                "axes.facecolor": cls.C_BG,
+                "figure.facecolor": "white",
+                "axes.edgecolor": "#D3D1C7",
+                "axes.linewidth": 0.6,
+                "axes.grid": True,
+                "grid.color": cls.C_GRID,
+                "grid.linewidth": 0.5,
+                "xtick.color": cls.C_GRAY,
+                "ytick.color": cls.C_GRAY,
+                "xtick.labelsize": 9,
+                "ytick.labelsize": 9,
+                "axes.labelsize": 10,
+                "axes.titlesize": 11,
+                "axes.titleweight": "bold",
+                "axes.titlepad": 10,
+                "legend.fontsize": 9,
+                "legend.frameon": False,
+            }
+        )
+
+    @staticmethod
+    def _add_stats_box(ax: Any, data: pd.Series) -> None:
+        txt = f"mean  {data.mean():.3f}\nmedian {data.median():.3f}\nstd    {data.std():.3f}"
+        ax.text(
+            0.97,
+            0.97,
+            txt,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=8,
+            color="#444441",
+            fontfamily="monospace",
+            bbox=dict(
+                boxstyle="round,pad=0.35",
+                fc="white",
+                ec="#D3D1C7",
+                lw=0.5,
+                alpha=0.85,
+            ),
+        )
+
+    def plot_score_distributions(self, results: pd.DataFrame, out_dir: str | Path) -> Path | None:
+        """Plot notebook score distributions with KDE and threshold shading."""
+        if not set(self.METRIC_COLORS).issubset(results.columns):
+            return None
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from scipy.stats import gaussian_kde
+
+        self._apply_style()
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4.5), constrained_layout=True)
+        fig.suptitle(
+            "Response coherence -- score distributions",
+            fontsize=13,
+            fontweight="bold",
+            color="#2C2C2A",
+            y=1.01,
+        )
+
+        for ax, (col, (color, color_l, thresh, (lo, hi))) in zip(
+            axes,
+            self.METRIC_COLORS.items(),
+        ):
             data = results[col].dropna()
-            ax.hist(data, bins=30, color="#4C9BE8", edgecolor="white", alpha=0.85)
-            ax.axvline(thresholds[col], color="#E74C3C", lw=1.5, ls="--", label=f"threshold {thresholds[col]}")
-            ax.set_title(labels[col])
-            ax.set_xlabel(labels[col])
-            ax.set_ylabel("Count")
-            ax.legend(fontsize=8)
-        fig.tight_layout()
+            if data.empty:
+                continue
+            bins = np.linspace(lo, hi, 26)
+            counts, edges = np.histogram(data, bins=bins)
+            for left, right, count in zip(edges[:-1], edges[1:], counts):
+                ax.bar(
+                    left,
+                    count,
+                    width=(right - left) * 0.92,
+                    align="edge",
+                    color=color_l if right <= thresh else color,
+                    zorder=2,
+                )
+            try:
+                kde = gaussian_kde(data, bw_method=0.12)
+                kde_x = np.linspace(lo, hi, 300)
+                ax.plot(
+                    kde_x,
+                    kde(kde_x) * len(data) * (bins[1] - bins[0]),
+                    color=color,
+                    lw=2,
+                    zorder=4,
+                )
+            except Exception:
+                pass
+
+            ax.axvspan(lo, thresh, color=color_l, alpha=0.15, zorder=1)
+            ax.axvline(thresh, color=self.C_RED, lw=1.5, ls="--", zorder=5)
+            ax.axvline(data.mean(), color=color, lw=1.2, ls=":", zorder=5)
+            ax.set_xlim(lo, hi)
+            ax.set_xlabel(self.METRIC_LABELS[col])
+            ax.set_ylabel("Count" if ax is axes[0] else "")
+            ax.set_title(self.METRIC_LABELS[col])
+            self._add_stats_box(ax, data)
+
+            n_flagged = int((data < thresh).sum())
+            ax.text(
+                0.03,
+                0.97,
+                f"{n_flagged} flagged ({n_flagged / len(data) * 100:.1f}%)",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=8,
+                color=self.C_RED,
+                bbox=dict(
+                    boxstyle="round,pad=0.3",
+                    fc="white",
+                    ec="#F09595",
+                    lw=0.5,
+                    alpha=0.9,
+                ),
+            )
+            ax.legend(
+                handles=[
+                    mpatches.Patch(color=color_l, label="below threshold"),
+                    mpatches.Patch(color=color, label="above threshold"),
+                    plt.Line2D([0], [0], color=self.C_RED, lw=1.5, ls="--", label=f"threshold {thresh}"),
+                ],
+                loc="upper left",
+                fontsize=7.5,
+            )
+
         output_path = self._prepare_out_dir(out_dir) / "fig1_score_distributions.png"
         fig.savefig(output_path, dpi=FIG_DPI, bbox_inches="tight")
         plt.close(fig)
         return output_path
 
     def plot_score_correlations(self, results: pd.DataFrame, out_dir: str | Path) -> Path | None:
-        """Plot pairwise coherence score correlations."""
-        cols = self._score_columns(results)
-        if len(cols) < 2:
+        """Plot notebook 3x3 score correlation matrix."""
+        metrics = list(self.METRIC_COLORS.keys())
+        if not set(metrics).issubset(results.columns):
             return None
         import matplotlib.pyplot as plt
+        from scipy.stats import gaussian_kde
 
+        self._apply_style()
         flag = results["flag_consensus"] if "flag_consensus" in results.columns else pd.Series(False, index=results.index)
-        fig, axes = plt.subplots(len(cols), len(cols), figsize=(9, 9), squeeze=False)
-        for i, y_col in enumerate(cols):
-            for j, x_col in enumerate(cols):
+        flagged = flag.astype(bool)
+        not_flagged = ~flagged
+        fig, axes = plt.subplots(3, 3, figsize=(11, 10), constrained_layout=True)
+        fig.suptitle(
+            "Score correlation matrix -- coloured by consensus flag",
+            fontsize=12,
+            fontweight="bold",
+            color="#2C2C2A",
+            y=1.01,
+        )
+        for i, row_m in enumerate(metrics):
+            for j, col_m in enumerate(metrics):
                 ax = axes[i][j]
+                ax.set_facecolor(self.C_BG)
                 if i == j:
-                    ax.hist(results[x_col].dropna(), bins=25, color="#B7D9F2", edgecolor="white")
+                    color, _, _, (lo, hi) = self.METRIC_COLORS[row_m]
+                    xs = np.linspace(lo, hi, 300)
+                    for mask, line_color, line_style in [
+                        (not_flagged, color, "-"),
+                        (flagged, self.C_RED, "--"),
+                    ]:
+                        data = results.loc[mask, row_m].dropna()
+                        if len(data) > 5:
+                            density = gaussian_kde(data, bw_method=0.15)(xs)
+                            ax.fill_between(xs, density, color=line_color, alpha=0.2)
+                            ax.plot(xs, density, color=line_color, lw=1.5, ls=line_style)
+                    ax.set_xlim(lo, hi)
+                    ax.set_title(self.METRIC_LABELS[row_m], fontsize=9, pad=6)
                 else:
-                    ax.scatter(results.loc[~flag, x_col], results.loc[~flag, y_col], s=15, color="#888888", alpha=0.5)
-                    ax.scatter(results.loc[flag, x_col], results.loc[flag, y_col], s=18, color="#E74C3C", alpha=0.7)
-                if i == len(cols) - 1:
-                    ax.set_xlabel(x_col)
+                    ax.scatter(results.loc[not_flagged, col_m], results.loc[not_flagged, row_m], s=6, color=self.C_GRAY, alpha=0.35, linewidths=0, rasterized=True)
+                    ax.scatter(results.loc[flagged, col_m], results.loc[flagged, row_m], s=8, color=self.C_RED, alpha=0.65, linewidths=0, rasterized=True)
+                    corr = results[[col_m, row_m]].dropna().corr().iloc[0, 1]
+                    ax.text(0.05, 0.95, f"r = {corr:.2f}", transform=ax.transAxes, fontsize=8, va="top", color="#2C2C2A", bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#D3D1C7", lw=0.5, alpha=0.85))
+                    ax.axvline(self.METRIC_COLORS[col_m][2], color=self.C_RED, lw=0.8, ls="--", alpha=0.6)
+                    ax.axhline(self.METRIC_COLORS[row_m][2], color=self.C_RED, lw=0.8, ls="--", alpha=0.6)
+                    lox, hix = self.METRIC_COLORS[col_m][3]
+                    loy, hiy = self.METRIC_COLORS[row_m][3]
+                    ax.set_xlim(lox, hix)
+                    ax.set_ylim(loy, hiy)
+                if i == 2:
+                    ax.set_xlabel(self.METRIC_LABELS[col_m], fontsize=8)
                 if j == 0:
-                    ax.set_ylabel(y_col)
-        fig.tight_layout()
+                    ax.set_ylabel(self.METRIC_LABELS[row_m], fontsize=8)
+                ax.tick_params(labelsize=7)
+        fig.legend(
+            handles=[
+                plt.scatter([], [], s=20, color=self.C_GRAY, alpha=0.6, label="coherent"),
+                plt.scatter([], [], s=20, color=self.C_RED, alpha=0.8, label="flagged"),
+            ],
+            loc="lower center",
+            ncol=2,
+            bbox_to_anchor=(0.5, -0.02),
+            fontsize=9,
+        )
         output_path = self._prepare_out_dir(out_dir) / "fig2_score_correlations.png"
         fig.savefig(output_path, dpi=FIG_DPI, bbox_inches="tight")
         plt.close(fig)
         return output_path
 
     def plot_decay(self, results: pd.DataFrame, out_dir: str | Path) -> Path | None:
-        """Plot coherence scores over conversation round."""
-        cols = self._score_columns(results)
-        if not cols or "round" not in results.columns:
+        """Plot notebook mean +/- std coherence decay by conversation round."""
+        metrics = list(self.METRIC_COLORS.keys())
+        if "round" not in results.columns or not set(metrics).issubset(results.columns):
             return None
         import matplotlib.pyplot as plt
+        import matplotlib.ticker as mticker
 
-        thresholds = {"cosine_similarity": 0.25, "bs_f1": 0.85, "cross_encoder_score": 0.50}
-        fig, axes = plt.subplots(1, len(cols), figsize=(5 * len(cols), 4), squeeze=False)
-        for ax, col in zip(axes[0], cols):
-            agg = results.groupby("round")[col].mean().reset_index()
-            ax.plot(agg["round"], agg[col], marker="o")
-            ax.axhline(thresholds[col], color="#E74C3C", lw=1.2, ls="--", alpha=0.8, label=f"threshold {thresholds[col]}")
+        self._apply_style()
+        agg = results.groupby("round")[metrics].agg(["mean", "std", "count"]).reset_index()
+        agg.columns = ["round"] + [f"{metric}_{stat}" for metric in metrics for stat in ["mean", "std", "count"]]
+        rounds = agg["round"].values
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4.2), constrained_layout=True)
+        fig.suptitle(
+            "Coherence decay by conversation round",
+            fontsize=13,
+            fontweight="bold",
+            color="#2C2C2A",
+            y=1.01,
+        )
+        for ax, (col, (color, _, thresh, _)) in zip(axes, self.METRIC_COLORS.items()):
+            mu = agg[f"{col}_mean"].values
+            sd = agg[f"{col}_std"].fillna(0).values
+            ax.fill_between(rounds, mu - sd, mu + sd, color=color, alpha=0.12, label="+/-1 std")
+            ax.plot(rounds, mu, color=color, lw=2.5, marker="o", markersize=5, markerfacecolor="white", markeredgecolor=color, markeredgewidth=1.5, zorder=4, label="mean")
+            ax.axhline(thresh, color=self.C_RED, lw=1.2, ls="--", alpha=0.8, label=f"threshold {thresh}")
+            if len(rounds) >= 3:
+                z = np.polyfit(rounds, mu, 1)
+                ax.plot(rounds, np.poly1d(z)(rounds), color=color, lw=1, ls=":", alpha=0.6, label=f"trend {z[0]:+.3f}/round")
+            ax.set_xlim(rounds[0] - 0.3, rounds[-1] + 0.3)
             ax.set_xlabel("Round")
-            ax.set_ylabel(col)
-            ax.set_title(col)
-            ax.legend(fontsize=8)
-        fig.tight_layout()
+            ax.set_ylabel(self.METRIC_LABELS[col] if ax is axes[0] else "")
+            ax.set_title(self.METRIC_LABELS[col])
+            ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+            ax.legend(fontsize=7.5, loc="upper right")
         output_path = self._prepare_out_dir(out_dir) / "fig3_coherence_decay.png"
         fig.savefig(output_path, dpi=FIG_DPI, bbox_inches="tight")
         plt.close(fig)
         return output_path
 
     def plot_thread_heatmap(self, results: pd.DataFrame, out_dir: str | Path) -> Path | None:
-        """Plot thread by round composite coherence heatmap."""
-        if not {"thread_id", "round"}.issubset(results.columns):
+        """Plot notebook composite coherence heatmap by thread and round."""
+        required = {"thread_id", "round", "cosine_similarity", "bs_f1", "cross_encoder_score"}
+        if not required.issubset(results.columns):
             return None
         import matplotlib.pyplot as plt
         import seaborn as sns
 
-        if "row_composite" in results.columns:
-            data = results
-        elif {"cosine_similarity", "bs_f1", "cross_encoder_score"}.issubset(results.columns):
-            data = results.copy()
-            bs_norm = ((data["bs_f1"] - 0.7) / 0.3).clip(0, 1)
-            data["row_composite"] = (data["cosine_similarity"] + bs_norm + data["cross_encoder_score"]) / 3
-        else:
-            return None
-        pivot = data.pivot_table(index="thread_id", columns="round", values="row_composite", aggfunc="mean")
+        self._apply_style()
+        data = results.copy()
+        data["bs_norm"] = ((data["bs_f1"] - 0.7) / 0.3).clip(0, 1)
+        data["composite"] = (data["cosine_similarity"] + data["bs_norm"] + data["cross_encoder_score"]) / 3
+        pivot = (
+            data[data["round"] <= 10]
+            .groupby(["thread_id", "round"])[["composite"]]
+            .mean()
+            .unstack("round")
+        )
+        pivot.columns = pivot.columns.droplevel(0)
         if pivot.empty:
             return None
         pivot = pivot.loc[pivot.mean(axis=1).sort_values().index]
-        fig, ax = plt.subplots(figsize=(10, max(4, min(18, len(pivot) * 0.2))))
-        sns.heatmap(pivot, cmap="viridis", ax=ax, yticklabels=False)
+        if len(pivot) > 50:
+            half = 25
+            pivot = pd.concat([pivot.head(half), pivot.tail(half)])
+        fig, ax = plt.subplots(figsize=(12, max(5, len(pivot) * 0.22 + 2)), constrained_layout=True)
+        fig.suptitle(
+            "Thread coherence heatmap (composite score per round)",
+            fontsize=12,
+            fontweight="bold",
+            color="#2C2C2A",
+        )
+        sns.heatmap(
+            pivot,
+            ax=ax,
+            cmap=sns.diverging_palette(10, 150, s=70, l=45, as_cmap=True),
+            center=0.5,
+            vmin=0.0,
+            vmax=1.0,
+            linewidths=0.3,
+            linecolor="#EEECEA",
+            cbar_kws={"label": "composite coherence", "shrink": 0.6},
+            yticklabels=False,
+        )
         ax.set_xlabel("Conversation round")
         ax.set_ylabel(f"Threads (n={len(pivot)}, sorted by mean coherence)")
-        fig.tight_layout()
+        worst_n = min(5, len(pivot) // 4)
+        ax.axhline(worst_n, color=self.C_RED, lw=1.2, ls="--", alpha=0.7)
+        ax.axhline(len(pivot) - worst_n, color=self.C_TEAL, lw=1.2, ls="--", alpha=0.7)
+        ax.text(-0.5, worst_n / 2, "least\ncoherent", ha="right", va="center", fontsize=8, color=self.C_RED, transform=ax.get_yaxis_transform())
+        ax.text(-0.5, len(pivot) - worst_n / 2, "most\ncoherent", ha="right", va="center", fontsize=8, color=self.C_TEAL, transform=ax.get_yaxis_transform())
         output_path = self._prepare_out_dir(out_dir) / "fig4_thread_heatmap.png"
         fig.savefig(output_path, dpi=FIG_DPI, bbox_inches="tight")
         plt.close(fig)
