@@ -102,6 +102,90 @@ class FakeEchoChamberAnalyzer:
             "separation_score": 0.4,
         }
 
+    def optimize_echo_chamber_weights(self, user_attitudes, community_stats, graph):
+        return (
+            {
+                "polarization": 0.1,
+                "homophily": 0.2,
+                "diversity": 0.3,
+                "separation": 0.4,
+            },
+            object(),
+        )
+
+    def compute_optimized_component_scores(
+        self,
+        daily_polarization,
+        daily_homophily,
+        user_attitudes,
+        community_stats,
+        final_day=None,
+    ):
+        return {
+            "polarization_score": 0.2,
+            "homophily_score": 0.3,
+            "diversity_score": 0.4,
+            "separation_score": 0.5,
+        }
+
+    def compute_optimized_echo_chamber_score(self, metrics, optimized_weights):
+        result = dict(metrics)
+        result["overall_score"] = 0.4
+        return result
+
+    def sensitivity_analysis(self, metrics, optimized_weights):
+        return pd.DataFrame({"scheme": ["Optimized"], "score": [0.4]})
+
+    def optimize_echo_chamber_weights_2d(self, user_attitudes, community_stats, graph):
+        metrics_df = pd.DataFrame(
+            {
+                "user_id": [1, 2],
+                "polarization": [0.2, 0.3],
+                "homophily": [0.0, 1.0],
+                "diversity": [0.5, 0.6],
+                "separation": [0.7, 0.8],
+            }
+        )
+        return (
+            {
+                "pc1": {
+                    "polarization": 0.25,
+                    "homophily": 0.25,
+                    "diversity": 0.25,
+                    "separation": 0.25,
+                },
+                "pc2": {
+                    "polarization": 0.1,
+                    "homophily": 0.2,
+                    "diversity": 0.3,
+                    "separation": 0.4,
+                },
+                "variances": np.array([0.6, 0.4]),
+            },
+            object(),
+            metrics_df,
+            np.array([[0.0, 0.0], [1.0, 1.0]]),
+        )
+
+    def compute_2d_optimized_score(self, metrics, weights_2d):
+        return {
+            "score_pc1": 0.35,
+            "score_pc2": 0.45,
+            "final_combined_score": 0.39,
+        }
+
+    def build_echo_chamber_landscape_dataframe(
+        self,
+        metrics_df,
+        metrics_scaled,
+        pca_model,
+        user_attitudes,
+    ):
+        result = metrics_df.copy()
+        result["PC1_Ideological"] = [0.0, 1.0]
+        result["PC2_Structural"] = [0.0, 1.0]
+        return result
+
 
 class ExplodingStanceEstimator:
     def transform_dataframe(self, *args, **kwargs):
@@ -525,6 +609,151 @@ def test_echo_chamber_analyzer_compute_echo_chamber_score_matches_notebook_weigh
     assert result["homophily_score"] == pytest.approx(homophily_score)
     assert result["diversity_score"] == pytest.approx(diversity_score)
     assert result["separation_score"] == pytest.approx(separation_score)
+
+
+def _pca_user_attitudes():
+    return pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4],
+            "propagated_attitude": [0.8, 0.4, -0.6, -0.2],
+            "exposure_diversity": [0.1, 0.3, 0.6, 0.8],
+            "community": [0, 0, 1, 1],
+        }
+    )
+
+
+def _pca_community_stats():
+    return pd.DataFrame(
+        {
+            "avg_attitude": [0.6, -0.4],
+            "attitude_std": [0.2, 0.3],
+            "avg_diversity": [0.2, 0.7],
+            "size": [2, 2],
+        },
+        index=[0, 1],
+    )
+
+
+def _pca_graph():
+    graph = nx.Graph()
+    graph.add_edges_from([(1, 2), (1, 3), (2, 4), (3, 4)])
+    return graph
+
+
+def test_echo_chamber_analyzer_optimized_weights_are_pca_derived_and_normalized():
+    weights, pca = EchoChamberAnalyzer.optimize_echo_chamber_weights(
+        _pca_user_attitudes(),
+        _pca_community_stats(),
+        _pca_graph(),
+    )
+
+    assert set(weights) == {"polarization", "homophily", "diversity", "separation"}
+    assert sum(weights.values()) == pytest.approx(1.0)
+    assert all(isinstance(value, float) for value in weights.values())
+    assert all(value >= 0 for value in weights.values())
+    assert hasattr(pca, "components_")
+    assert pca.n_components == 1
+    assert list(weights.values()) != pytest.approx([0.3, 0.3, 0.2, 0.2])
+
+
+def test_echo_chamber_analyzer_optimized_component_scores_match_notebook_columns():
+    daily_pol = {
+        1: {"variance": 0.1, "bimodality": 0.2, "inter_group_distance": 0.3},
+        2: {"variance": 0.25, "bimodality": 0.4, "inter_group_distance": 0.7},
+    }
+    daily_homo = {
+        1: {"assortativity": 0.1, "homophily_ratio": 0.2},
+        2: {"assortativity": 0.3, "homophily_ratio": 0.6},
+    }
+
+    result = EchoChamberAnalyzer.compute_optimized_component_scores(
+        daily_pol,
+        daily_homo,
+        _pca_user_attitudes(),
+        _pca_community_stats(),
+    )
+
+    assert result == {
+        "polarization_score": pytest.approx(0.5),
+        "homophily_score": pytest.approx(0.6),
+        "diversity_score": pytest.approx(1 - np.mean([0.1, 0.3, 0.6, 0.8])),
+        "separation_score": pytest.approx(
+            min(1.0, _pca_community_stats()["avg_attitude"].var() / 0.3)
+        ),
+    }
+
+
+def test_echo_chamber_analyzer_optimized_score_and_sensitivity_are_not_fixed_only():
+    metrics = {
+        "polarization_score": 0.5,
+        "homophily_score": 0.6,
+        "diversity_score": 0.7,
+        "separation_score": 0.8,
+    }
+    weights = {
+        "polarization": 0.1,
+        "homophily": 0.2,
+        "diversity": 0.3,
+        "separation": 0.4,
+    }
+
+    optimized = EchoChamberAnalyzer.compute_optimized_echo_chamber_score(metrics, weights)
+    sensitivity = EchoChamberAnalyzer.sensitivity_analysis(optimized, weights)
+
+    assert optimized["overall_score"] == pytest.approx(
+        0.1 * 0.5 + 0.2 * 0.6 + 0.3 * 0.7 + 0.4 * 0.8
+    )
+    assert sensitivity.columns.tolist() == ["scheme", "score"]
+    assert sensitivity["scheme"].tolist() == [
+        "Equal",
+        "Polarization-heavy",
+        "Homophily-heavy",
+        "Diversity-heavy",
+        "Separation-heavy",
+        "Optimized",
+    ]
+    assert sensitivity.loc[sensitivity["scheme"] == "Optimized", "score"].iloc[0] == pytest.approx(
+        optimized["overall_score"]
+    )
+
+
+def test_echo_chamber_analyzer_2d_pca_outputs_weights_metrics_and_landscape_shape():
+    weights_2d, pca, metrics_df, metrics_scaled = (
+        EchoChamberAnalyzer.optimize_echo_chamber_weights_2d(
+            _pca_user_attitudes(),
+            _pca_community_stats(),
+            _pca_graph(),
+        )
+    )
+    component_scores = {
+        "polarization_score": 0.5,
+        "homophily_score": 0.6,
+        "diversity_score": 0.7,
+        "separation_score": 0.8,
+    }
+    score = EchoChamberAnalyzer.compute_2d_optimized_score(component_scores, weights_2d)
+    landscape = EchoChamberAnalyzer.build_echo_chamber_landscape_dataframe(
+        metrics_df,
+        metrics_scaled,
+        pca,
+        _pca_user_attitudes(),
+    )
+
+    assert set(weights_2d) == {"pc1", "pc2", "variances"}
+    assert sum(weights_2d["pc1"].values()) == pytest.approx(1.0)
+    assert sum(weights_2d["pc2"].values()) == pytest.approx(1.0)
+    assert metrics_df.columns.tolist() == [
+        "user_id",
+        "polarization",
+        "homophily",
+        "diversity",
+        "separation",
+    ]
+    assert metrics_scaled.shape == (4, 4)
+    assert pca.n_components == 2
+    assert set(score) == {"score_pc1", "score_pc2", "final_combined_score"}
+    assert {"PC1_Ideological", "PC2_Structural"}.issubset(landscape.columns)
+    assert len(landscape) == 4
 
 
 def test_echo_chamber_pipeline_orchestrates_existing_stance_columns():

@@ -429,6 +429,287 @@ class EchoChamberAnalyzer:
     """Compute echo-chamber metrics from attitudes and an interaction graph."""
 
     @staticmethod
+    def _neighbor_attitudes_for_user(
+        user_id: Any,
+        user_df: pd.DataFrame,
+        graph: nx.Graph,
+        user_col: str = "user_id",
+        attitude_col: str = "propagated_attitude",
+    ) -> list[float]:
+        neighbors = list(graph.neighbors(user_id))
+        if len(neighbors) == 0:
+            return []
+        return [
+            user_df[user_df[user_col] == neighbor][attitude_col].values[0]
+            for neighbor in neighbors
+            if neighbor in user_df[user_col].values
+        ]
+
+    @classmethod
+    def build_pca_weight_metrics(
+        cls,
+        user_df: pd.DataFrame,
+        community_stats: pd.DataFrame,
+        graph: nx.Graph,
+        diversity_col_name: str = "low_diversity",
+        user_col: str = "user_id",
+    ) -> pd.DataFrame:
+        """Build per-user metrics used by the notebook PCA weighting cells."""
+        metrics_list = []
+
+        for _, user in user_df.iterrows():
+            user_id = user[user_col]
+
+            local_polarization = abs(user["propagated_attitude"])
+
+            neighbor_attitudes = cls._neighbor_attitudes_for_user(
+                user_id,
+                user_df,
+                graph,
+                user_col=user_col,
+            )
+            if len(neighbor_attitudes) > 0:
+                local_homophily = np.mean(
+                    [
+                        1 if user["propagated_attitude"] * neighbor_attitude > 0 else 0
+                        for neighbor_attitude in neighbor_attitudes
+                    ]
+                )
+            else:
+                local_homophily = 0
+
+            local_diversity = 1 - user["exposure_diversity"]
+
+            user_comm = user["community"]
+            comm_attitude = community_stats.loc[user_comm, "avg_attitude"]
+            opposite_attitudes = community_stats[
+                community_stats["avg_attitude"] * comm_attitude < 0
+            ]["avg_attitude"].values
+
+            if len(opposite_attitudes) > 0:
+                local_separation = abs(
+                    user["propagated_attitude"] - np.mean(opposite_attitudes)
+                )
+            else:
+                local_separation = 0
+
+            metrics_list.append(
+                {
+                    "user_id": user_id,
+                    "polarization": local_polarization,
+                    "homophily": local_homophily,
+                    diversity_col_name: local_diversity,
+                    "separation": local_separation,
+                }
+            )
+
+        return pd.DataFrame(metrics_list)
+
+    @classmethod
+    def optimize_echo_chamber_weights(
+        cls,
+        user_df: pd.DataFrame,
+        community_stats: pd.DataFrame,
+        graph: nx.Graph,
+    ) -> tuple[dict[str, float], Any]:
+        """Use one-component PCA to find notebook data-driven weights."""
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+
+        metrics_df = cls.build_pca_weight_metrics(
+            user_df,
+            community_stats,
+            graph,
+            diversity_col_name="low_diversity",
+        )
+
+        scaler = StandardScaler()
+        metrics_scaled = scaler.fit_transform(
+            metrics_df[["polarization", "homophily", "low_diversity", "separation"]]
+        )
+
+        pca = PCA(n_components=1)
+        pca.fit(metrics_scaled)
+
+        weights_raw = np.abs(pca.components_[0])
+        weights_normalized = weights_raw / weights_raw.sum()
+
+        weight_dict = {
+            "polarization": float(weights_normalized[0]),
+            "homophily": float(weights_normalized[1]),
+            "diversity": float(weights_normalized[2]),
+            "separation": float(weights_normalized[3]),
+        }
+
+        return weight_dict, pca
+
+    @staticmethod
+    def compute_optimized_component_scores(
+        daily_polarization: dict[Any, dict[str, float]],
+        daily_homophily: dict[Any, dict[str, float]],
+        user_attitudes: pd.DataFrame,
+        community_stats: pd.DataFrame,
+        final_day: Any | None = None,
+    ) -> dict[str, float]:
+        """Compute the notebook's optimized component-score table."""
+        day = max(daily_polarization.keys()) if final_day is None else final_day
+        echo_chamber_metrics_optimized = {
+            "polarization_score": daily_polarization[day]["variance"] / 0.5,
+            "homophily_score": daily_homophily[day]["homophily_ratio"],
+            "diversity_score": 1 - user_attitudes["exposure_diversity"].mean(),
+            "separation_score": community_stats["avg_attitude"].var() / 0.3,
+        }
+
+        for key in echo_chamber_metrics_optimized:
+            echo_chamber_metrics_optimized[key] = min(
+                1.0,
+                echo_chamber_metrics_optimized[key],
+            )
+
+        return {
+            key: float(value) for key, value in echo_chamber_metrics_optimized.items()
+        }
+
+    @staticmethod
+    def compute_optimized_echo_chamber_score(
+        metrics: dict[str, float],
+        optimized_weights: dict[str, float],
+    ) -> dict[str, float]:
+        """Apply one-component PCA weights to optimized component scores."""
+        overall_score_optimized = (
+            optimized_weights["polarization"] * metrics["polarization_score"]
+            + optimized_weights["homophily"] * metrics["homophily_score"]
+            + optimized_weights["diversity"] * metrics["diversity_score"]
+            + optimized_weights["separation"] * metrics["separation_score"]
+        )
+
+        result = dict(metrics)
+        result["overall_score"] = float(overall_score_optimized)
+        return result
+
+    @staticmethod
+    def sensitivity_analysis(
+        metrics: dict[str, float],
+        optimized_weights: dict[str, float],
+    ) -> pd.DataFrame:
+        """Test how sensitive the overall score is to notebook weight schemes."""
+        weight_sets = {
+            "Equal": [0.25, 0.25, 0.25, 0.25],
+            "Polarization-heavy": [0.5, 0.2, 0.15, 0.15],
+            "Homophily-heavy": [0.2, 0.5, 0.15, 0.15],
+            "Diversity-heavy": [0.2, 0.15, 0.5, 0.15],
+            "Separation-heavy": [0.2, 0.15, 0.15, 0.5],
+            "Optimized": list(optimized_weights.values()),
+        }
+
+        results = []
+        for name, weights in weight_sets.items():
+            score = (
+                weights[0] * metrics["polarization_score"]
+                + weights[1] * metrics["homophily_score"]
+                + weights[2] * metrics["diversity_score"]
+                + weights[3] * metrics["separation_score"]
+            )
+            results.append({"scheme": name, "score": float(score)})
+
+        return pd.DataFrame(results)
+
+    @classmethod
+    def optimize_echo_chamber_weights_2d(
+        cls,
+        user_df: pd.DataFrame,
+        community_stats: pd.DataFrame,
+        graph: nx.Graph,
+    ) -> tuple[dict[str, Any], Any, pd.DataFrame, np.ndarray]:
+        """Use two-component PCA to find structural and ideological weights."""
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+
+        metrics_df = cls.build_pca_weight_metrics(
+            user_df,
+            community_stats,
+            graph,
+            diversity_col_name="diversity",
+        )
+
+        scaler = StandardScaler()
+        feature_cols = ["polarization", "homophily", "diversity", "separation"]
+        metrics_scaled = scaler.fit_transform(metrics_df[feature_cols])
+
+        pca = PCA(n_components=2)
+        pca.fit(metrics_scaled)
+
+        weights_pc1_raw = np.abs(pca.components_[0])
+        weights_pc1_norm = weights_pc1_raw / weights_pc1_raw.sum()
+
+        weights_pc2_raw = np.abs(pca.components_[1])
+        weights_pc2_norm = weights_pc2_raw / weights_pc2_raw.sum()
+
+        var_ratios = pca.explained_variance_ratio_
+
+        weight_dicts: dict[str, Any] = {
+            "pc1": {
+                key: float(value)
+                for key, value in zip(feature_cols, weights_pc1_norm)
+            },
+            "pc2": {
+                key: float(value)
+                for key, value in zip(feature_cols, weights_pc2_norm)
+            },
+            "variances": var_ratios,
+        }
+
+        return weight_dicts, pca, metrics_df, metrics_scaled
+
+    @staticmethod
+    def compute_2d_optimized_score(
+        metrics: dict[str, float],
+        weights_2d: dict[str, Any],
+    ) -> dict[str, float]:
+        """Compute PC1, PC2, and variance-weighted 2D optimized scores."""
+        score_pc1 = (
+            weights_2d["pc1"]["polarization"] * metrics["polarization_score"]
+            + weights_2d["pc1"]["homophily"] * metrics["homophily_score"]
+            + weights_2d["pc1"]["diversity"] * metrics["diversity_score"]
+            + weights_2d["pc1"]["separation"] * metrics["separation_score"]
+        )
+
+        score_pc2 = (
+            weights_2d["pc2"]["polarization"] * metrics["polarization_score"]
+            + weights_2d["pc2"]["homophily"] * metrics["homophily_score"]
+            + weights_2d["pc2"]["diversity"] * metrics["diversity_score"]
+            + weights_2d["pc2"]["separation"] * metrics["separation_score"]
+        )
+
+        var1, var2 = weights_2d["variances"][0], weights_2d["variances"][1]
+        final_combined_score = (var1 * score_pc1 + var2 * score_pc2) / (var1 + var2)
+
+        return {
+            "score_pc1": float(score_pc1),
+            "score_pc2": float(score_pc2),
+            "final_combined_score": float(final_combined_score),
+        }
+
+    @staticmethod
+    def build_echo_chamber_landscape_dataframe(
+        metrics_df: pd.DataFrame,
+        metrics_scaled: np.ndarray,
+        pca_model: Any,
+        user_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Return the notebook's 2D PCA landscape dataframe for plotting."""
+        pca_scores = pca_model.transform(metrics_scaled)
+
+        plot_df = metrics_df.copy()
+        plot_df["PC1_Ideological"] = pca_scores[:, 0]
+        plot_df["PC2_Structural"] = pca_scores[:, 1]
+
+        return plot_df.merge(
+            user_df[["user_id", "community", "propagated_attitude"]],
+            on="user_id",
+        )
+
+    @staticmethod
     def measure_polarization(attitudes: dict[Any, float]) -> dict[str, float]:
         """Measure variance, bimodality, and inter-group attitude distance."""
         attitudes_array = np.array(list(attitudes.values()))
@@ -745,6 +1026,53 @@ class EchoChamberPipeline:
             user_attitudes["exposure_diversity"].dropna(),
             community_stats,
         )
+        daily_polarization = {
+            day: self.analyzer.measure_polarization(attitudes)
+            for day, attitudes in propagation_history.items()
+        }
+        daily_homophily = {
+            day: self.analyzer.measure_homophily(graph_undirected, attitudes)
+            for day, attitudes in propagation_history.items()
+        }
+        optimized_weights, pca_model = self.analyzer.optimize_echo_chamber_weights(
+            user_attitudes,
+            community_stats,
+            graph_undirected,
+        )
+        optimized_component_scores = self.analyzer.compute_optimized_component_scores(
+            daily_polarization,
+            daily_homophily,
+            user_attitudes,
+            community_stats,
+            final_day=final_day,
+        )
+        echo_chamber_metrics_optimized = (
+            self.analyzer.compute_optimized_echo_chamber_score(
+                optimized_component_scores,
+                optimized_weights,
+            )
+        )
+        sensitivity_results = self.analyzer.sensitivity_analysis(
+            echo_chamber_metrics_optimized,
+            optimized_weights,
+        )
+        weights_2d, pca_model_2d, pca_metrics_df, pca_metrics_scaled = (
+            self.analyzer.optimize_echo_chamber_weights_2d(
+                user_attitudes,
+                community_stats,
+                graph_undirected,
+            )
+        )
+        echo_chamber_metrics_optimized_2d = self.analyzer.compute_2d_optimized_score(
+            echo_chamber_metrics_optimized,
+            weights_2d,
+        )
+        landscape_df = self.analyzer.build_echo_chamber_landscape_dataframe(
+            pca_metrics_df,
+            pca_metrics_scaled,
+            pca_model_2d,
+            user_attitudes,
+        )
 
         return {
             "tweets": tweet_df,
@@ -762,4 +1090,17 @@ class EchoChamberPipeline:
             "modularity": modularity,
             "community_stats": community_stats,
             "echo_chamber_metrics": echo_chamber_metrics,
+            "daily_polarization": daily_polarization,
+            "daily_homophily": daily_homophily,
+            "optimized_weights": optimized_weights,
+            "pca_model": pca_model,
+            "optimized_component_scores": optimized_component_scores,
+            "echo_chamber_metrics_optimized": echo_chamber_metrics_optimized,
+            "sensitivity_results": sensitivity_results,
+            "weights_2d": weights_2d,
+            "pca_model_2d": pca_model_2d,
+            "pca_metrics_df": pca_metrics_df,
+            "pca_metrics_scaled": pca_metrics_scaled,
+            "echo_chamber_metrics_optimized_2d": echo_chamber_metrics_optimized_2d,
+            "landscape_df": landscape_df,
         }
