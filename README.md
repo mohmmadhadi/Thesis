@@ -1,6 +1,6 @@
 # Social Media Analysis
 
-This repository contains a notebook-based social media analysis project that is being refactored into a reusable Python package. The original notebooks are preserved as analysis and reporting notebooks. Reusable logic is being extracted incrementally into `src/social_analysis/`, with lightweight tests and runnable pipeline scripts added around the extracted components.
+This repository contains a notebook-first social media analysis project. The original notebooks remain the primary analysis and reporting layer, while `src/social_analysis/`, `scripts/`, `configs/`, and `tests/` provide reusable support code for shared helpers, reproducible pipeline steps, configuration, and lightweight validation.
 
 The project analyzes simulated social media conversations, including exploratory data preparation, sentiment and emotion analysis, conversation dynamics, response coherence, topic modeling, user clustering, and echo chamber metrics.
 
@@ -157,7 +157,7 @@ python scripts/run_user_clustering.py
 python scripts/run_echo_chamber.py
 ```
 
-The scripts are intended as initial runnable entry points around the extracted package code. They have syntax-level validation, but they have not yet been fully validated end to end on a complete local dataset in this repository.
+The scripts are intended as reproducible entry points around the shared support modules. They have syntax-level validation, but they have not yet been fully validated end to end on a complete local dataset in this repository.
 
 ## Main Outputs
 
@@ -220,7 +220,7 @@ The tests focus on deterministic behavior and mocked components. They intentiona
 ## Reproducibility Notes
 
 - Central paths and selected parameters are stored in `configs/default.yaml`.
-- The repository is moving from notebooks toward tested package modules in `src/social_analysis/`.
+- The repository keeps the notebook workflow as the source of analysis and reporting, with shared code factored into `src/social_analysis/` for reuse and testing.
 - Some extracted classes preserve notebook constants directly, including thresholds, model names, score weights, and column names.
 - Scripts should be run from the project root.
 - Heavy model outputs may vary slightly across dependency versions, hardware, and downloaded model revisions.

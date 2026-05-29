@@ -1,6 +1,6 @@
 # Reference Output Preservation Checklist
 
-Reference outputs are needed before validating the Python package refactor. They provide a known-good snapshot of the notebook behavior so extracted modules, scripts, and future tests can be compared against the original analysis without changing formulas, thresholds, column names, or model choices.
+Reference outputs are needed before validating the support modules and pipeline scripts. They provide a known-good snapshot of the notebook behavior so reusable helpers, scripts, and future tests can be compared against the original analysis without changing formulas, thresholds, column names, or model choices.
 
 Do not treat this document as evidence that reference outputs already exist. It is a checklist for what should be generated and copied after the notebooks are run.
 
