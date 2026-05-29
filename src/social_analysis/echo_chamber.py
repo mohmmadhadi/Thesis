@@ -1491,6 +1491,234 @@ class EchoChamberAnalyzer:
         }
 
     @staticmethod
+    def lifetime_attitude_shift(
+        df: pd.DataFrame,
+        user_col: str = "user_id",
+        day_col: str = "day",
+        attitude_col: str = "attitude_score",
+    ) -> pd.DataFrame:
+        """Return first-vs-last user attitude comparison from notebook cell 31."""
+        df_sorted = df.sort_values(by=[user_col, day_col])
+        first_attitudes = df_sorted.groupby(user_col).first()[attitude_col]
+        last_attitudes = df_sorted.groupby(user_col).last()[attitude_col]
+
+        comparison_df = pd.DataFrame(
+            {
+                "first_val": first_attitudes,
+                "last_val": last_attitudes,
+            }
+        ).dropna()
+        comparison_df["shift"] = comparison_df["last_val"] - comparison_df["first_val"]
+        comparison_df["shift_magnitude"] = np.abs(comparison_df["shift"])
+        return comparison_df
+
+    @staticmethod
+    def propagation_attitude_shift(
+        propagation_history: dict[Any, dict[Any, float]],
+    ) -> pd.DataFrame:
+        """Return start-vs-end propagated attitude shifts from notebook cell 32."""
+        if not propagation_history:
+            return pd.DataFrame(
+                columns=[
+                    "user_id",
+                    "start_day",
+                    "end_day",
+                    "start_val",
+                    "end_val",
+                    "shift",
+                    "shift_magnitude",
+                ]
+            )
+
+        start_day = sorted(propagation_history.keys())[0]
+        end_day = sorted(propagation_history.keys())[-1]
+
+        users_on_start_day = set(propagation_history[start_day].keys())
+        users_on_end_day = set(propagation_history[end_day].keys())
+        common_users_active_both_days = sorted(
+            list(users_on_start_day.intersection(users_on_end_day))
+        )
+
+        rows = []
+        for user_id in common_users_active_both_days:
+            start_val = propagation_history[start_day][user_id]
+            end_val = propagation_history[end_day][user_id]
+            shift = end_val - start_val
+            rows.append(
+                {
+                    "user_id": user_id,
+                    "start_day": start_day,
+                    "end_day": end_day,
+                    "start_val": start_val,
+                    "end_val": end_val,
+                    "shift": shift,
+                    "shift_magnitude": abs(shift),
+                }
+            )
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "user_id",
+                "start_day",
+                "end_day",
+                "start_val",
+                "end_val",
+                "shift",
+                "shift_magnitude",
+            ],
+        )
+
+    @classmethod
+    def polarization_comparison_report(
+        cls,
+        user_attitudes: pd.DataFrame,
+        propagation_history: dict[Any, dict[Any, float]],
+    ) -> dict[str, Any]:
+        """Return notebook polarization trend and original/propagated comparison."""
+        days = sorted(propagation_history.keys())
+        daily_pol = {
+            day: cls.measure_polarization(propagation_history[day]) for day in days
+        }
+        polarization_original = cls.measure_polarization(
+            dict(zip(user_attitudes["user_id"], user_attitudes["mean_attitude"]))
+        )
+        polarization_propagated = (
+            cls.measure_polarization(propagation_history[max(days)])
+            if days
+            else {"variance": 0, "bimodality": 0, "inter_group_distance": 0}
+        )
+
+        trend_df = pd.DataFrame(
+            [
+                {
+                    "day": day,
+                    "variance": daily_pol[day]["variance"],
+                    "bimodality": daily_pol[day]["bimodality"],
+                    "inter_group_distance": daily_pol[day]["inter_group_distance"],
+                }
+                for day in days
+            ],
+            columns=["day", "variance", "bimodality", "inter_group_distance"],
+        )
+        metrics = ["variance", "bimodality", "inter_group_distance"]
+        comparison_df = pd.DataFrame(
+            {
+                "metric": metrics,
+                "original": [polarization_original[metric] for metric in metrics],
+                "propagated": [
+                    polarization_propagated[metric] for metric in metrics
+                ],
+            }
+        )
+
+        return {
+            "daily_polarization": daily_pol,
+            "polarization_original": polarization_original,
+            "polarization_propagated": polarization_propagated,
+            "trend_df": trend_df,
+            "comparison_df": comparison_df,
+        }
+
+    @staticmethod
+    def exposure_diversity_report(
+        user_attitudes: pd.DataFrame,
+        low_threshold: float = 0.3,
+        high_threshold: float = 0.6,
+    ) -> dict[str, Any]:
+        """Return notebook exposure-diversity summary and category counts."""
+        result = user_attitudes.copy()
+        result["diversity_category"] = pd.cut(
+            result["exposure_diversity"],
+            bins=3,
+            labels=["Low", "Medium", "High"],
+        )
+        diversity_counts = result["diversity_category"].value_counts()
+
+        return {
+            "user_attitudes": result,
+            "describe": result["exposure_diversity"].describe(),
+            "diversity_counts": diversity_counts,
+            "low_diversity_count": (
+                result["exposure_diversity"] < low_threshold
+            ).sum(),
+            "high_diversity_count": (
+                result["exposure_diversity"] > high_threshold
+            ).sum(),
+        }
+
+    @staticmethod
+    def attitude_variance_by_connectivity(
+        user_attitudes: pd.DataFrame,
+        graph: nx.Graph,
+    ) -> dict[str, Any]:
+        """Return notebook connectivity groups and attitude variance table."""
+        result = user_attitudes.copy()
+        degree_dict = dict(graph.degree())
+        result["degree"] = result["user_id"].map(degree_dict)
+
+        q1 = result["degree"].quantile(0.25)
+        q3 = result["degree"].quantile(0.75)
+
+        result["connectivity_group"] = "Medium"
+        result.loc[result["degree"] <= q1, "connectivity_group"] = "Isolated"
+        result.loc[
+            result["degree"] >= q3,
+            "connectivity_group",
+        ] = "Highly Connected"
+
+        variance_comparison = result.groupby("connectivity_group").agg(
+            {
+                "user_id": "count",
+                "mean_attitude": ["mean", "var"],
+                "exposure_diversity": "mean",
+            }
+        ).round(4)
+        variance_comparison.columns = [
+            "Count",
+            "Avg_Attitude",
+            "Attitude_Variance",
+            "Avg_Exposure_Diversity",
+        ]
+
+        return {
+            "user_attitudes": result,
+            "variance_comparison": variance_comparison,
+            "q1": q1,
+            "q3": q3,
+        }
+
+    @staticmethod
+    def echo_chamber_component_table(
+        echo_chamber_metrics: dict[str, float],
+    ) -> pd.DataFrame:
+        """Return notebook component-score table used before plotting."""
+        return pd.DataFrame(
+            {
+                "component": [
+                    "Polarization",
+                    "Homophily",
+                    "Low Diversity",
+                    "Separation",
+                    "Overall",
+                ],
+                "score": [
+                    echo_chamber_metrics["polarization_score"],
+                    echo_chamber_metrics["homophily_score"],
+                    echo_chamber_metrics["diversity_score"],
+                    echo_chamber_metrics["separation_score"],
+                    echo_chamber_metrics["overall_score"],
+                ],
+                "color": [
+                    "#ff6b6b",
+                    "#4ecdc4",
+                    "#45b7d1",
+                    "#f9ca24",
+                    "#6c5ce7",
+                ],
+            }
+        )
+
+    @staticmethod
     def compute_echo_chamber_score(
         polarization: dict[str, float],
         homophily: dict[str, float],

@@ -1000,6 +1000,191 @@ def test_echo_chamber_analyzer_summary_and_low_diversity_reports_match_notebook_
     assert report["low_diversity_community_summary"].to_dict() == {0: 1, 1: 1}
 
 
+def test_echo_chamber_analyzer_lifetime_attitude_shift_matches_notebook_columns():
+    df = pd.DataFrame(
+        {
+            "user_id": [2, 1, 1, 2, 3],
+            "day": [2, 1, 3, 1, 1],
+            "attitude_score": [-0.1, 0.2, 0.8, -0.4, np.nan],
+        }
+    )
+
+    result = EchoChamberAnalyzer.lifetime_attitude_shift(df)
+
+    assert result.index.tolist() == [1, 2]
+    assert result.columns.tolist() == [
+        "first_val",
+        "last_val",
+        "shift",
+        "shift_magnitude",
+    ]
+    assert result.loc[1, "first_val"] == 0.2
+    assert result.loc[1, "last_val"] == 0.8
+    assert result.loc[1, "shift"] == pytest.approx(0.6)
+    assert result.loc[2, "first_val"] == -0.4
+    assert result.loc[2, "last_val"] == -0.1
+
+
+def test_echo_chamber_analyzer_propagation_attitude_shift_handles_common_and_empty():
+    history = {
+        1: {1: 0.2, 2: -0.3},
+        3: {1: 0.6, 3: -0.4},
+    }
+
+    result = EchoChamberAnalyzer.propagation_attitude_shift(history)
+    empty = EchoChamberAnalyzer.propagation_attitude_shift({})
+
+    assert result.columns.tolist() == [
+        "user_id",
+        "start_day",
+        "end_day",
+        "start_val",
+        "end_val",
+        "shift",
+        "shift_magnitude",
+    ]
+    assert result["user_id"].tolist() == [1]
+    assert result.loc[0, "start_day"] == 1
+    assert result.loc[0, "end_day"] == 3
+    assert result.loc[0, "shift"] == pytest.approx(0.4)
+    assert empty.empty
+    assert empty.columns.tolist() == result.columns.tolist()
+
+
+def test_echo_chamber_analyzer_polarization_comparison_report_returns_plot_ready_tables():
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4],
+            "mean_attitude": [0.2, -0.2, 0.5, -0.5],
+        }
+    )
+    history = {
+        1: {1: 0.1, 2: -0.1},
+        2: {1: 0.3, 2: -0.3, 3: 0.6, 4: -0.6},
+    }
+
+    result = EchoChamberAnalyzer.polarization_comparison_report(
+        user_attitudes,
+        history,
+    )
+
+    assert set(result) == {
+        "daily_polarization",
+        "polarization_original",
+        "polarization_propagated",
+        "trend_df",
+        "comparison_df",
+    }
+    assert result["trend_df"].columns.tolist() == [
+        "day",
+        "variance",
+        "bimodality",
+        "inter_group_distance",
+    ]
+    assert result["trend_df"]["day"].tolist() == [1, 2]
+    assert result["comparison_df"].columns.tolist() == [
+        "metric",
+        "original",
+        "propagated",
+    ]
+    assert result["comparison_df"]["metric"].tolist() == [
+        "variance",
+        "bimodality",
+        "inter_group_distance",
+    ]
+
+
+def test_echo_chamber_analyzer_exposure_diversity_report_uses_notebook_bins():
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3],
+            "exposure_diversity": [0.1, 0.4, 0.8],
+        }
+    )
+
+    result = EchoChamberAnalyzer.exposure_diversity_report(user_attitudes)
+
+    labeled = result["user_attitudes"]
+    assert "diversity_category" in labeled.columns
+    assert labeled["diversity_category"].astype(str).tolist() == [
+        "Low",
+        "Medium",
+        "High",
+    ]
+    assert result["low_diversity_count"] == 1
+    assert result["high_diversity_count"] == 1
+    assert set(result["diversity_counts"].index.astype(str)) == {
+        "Low",
+        "Medium",
+        "High",
+    }
+
+
+def test_echo_chamber_analyzer_attitude_variance_by_connectivity_matches_group_rules():
+    graph = nx.Graph()
+    graph.add_edges_from([(1, 2), (1, 3), (1, 4), (2, 3)])
+    graph.add_node(5)
+    user_attitudes = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4, 5],
+            "mean_attitude": [0.8, 0.4, -0.2, -0.6, 0.1],
+            "exposure_diversity": [0.2, 0.3, 0.4, 0.5, 0.6],
+        }
+    )
+
+    result = EchoChamberAnalyzer.attitude_variance_by_connectivity(
+        user_attitudes,
+        graph,
+    )
+
+    labeled = result["user_attitudes"]
+    variance = result["variance_comparison"]
+    assert {"degree", "connectivity_group"}.issubset(labeled.columns)
+    assert result["q1"] == labeled["degree"].quantile(0.25)
+    assert result["q3"] == labeled["degree"].quantile(0.75)
+    assert labeled.loc[labeled["degree"] <= result["q1"], "connectivity_group"].eq(
+        "Isolated"
+    ).all()
+    assert labeled.loc[labeled["degree"] >= result["q3"], "connectivity_group"].eq(
+        "Highly Connected"
+    ).all()
+    assert variance.columns.tolist() == [
+        "Count",
+        "Avg_Attitude",
+        "Attitude_Variance",
+        "Avg_Exposure_Diversity",
+    ]
+
+
+def test_echo_chamber_analyzer_component_table_preserves_notebook_order_and_colors():
+    metrics = {
+        "polarization_score": 0.1,
+        "homophily_score": 0.2,
+        "diversity_score": 0.3,
+        "separation_score": 0.4,
+        "overall_score": 0.5,
+    }
+
+    result = EchoChamberAnalyzer.echo_chamber_component_table(metrics)
+
+    assert result.columns.tolist() == ["component", "score", "color"]
+    assert result["component"].tolist() == [
+        "Polarization",
+        "Homophily",
+        "Low Diversity",
+        "Separation",
+        "Overall",
+    ]
+    assert result["score"].tolist() == [0.1, 0.2, 0.3, 0.4, 0.5]
+    assert result["color"].tolist() == [
+        "#ff6b6b",
+        "#4ecdc4",
+        "#45b7d1",
+        "#f9ca24",
+        "#6c5ce7",
+    ]
+
+
 def test_echo_chamber_analyzer_compute_echo_chamber_score_matches_notebook_weights():
     polarization = {"variance": 0.25, "bimodality": 0.35, "inter_group_distance": 0.75}
     homophily = {"assortativity": 0.4, "homophily_ratio": 0.6}
