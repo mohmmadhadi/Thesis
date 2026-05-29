@@ -611,6 +611,85 @@ def test_echo_chamber_analyzer_compute_echo_chamber_score_matches_notebook_weigh
     assert result["separation_score"] == pytest.approx(separation_score)
 
 
+def test_echo_chamber_analyzer_improved_bimodality_insufficient_sample_keys():
+    values = np.array([-0.5, 0.0, 0.5])
+
+    result = EchoChamberAnalyzer.improved_bimodality_test(values, min_sample_size=50)
+
+    assert result == {
+        "sample_size": 3,
+        "bimodal": False,
+        "reason": "insufficient_data",
+        "dip_statistic": None,
+        "separation_index": None,
+        "variance": pytest.approx(np.var(values)),
+    }
+
+
+def test_echo_chamber_analyzer_improved_bimodality_detects_synthetic_bimodal_distribution():
+    left = np.linspace(-0.85, -0.55, 60)
+    right = np.linspace(0.55, 0.85, 60)
+    values = np.concatenate([left, right])
+
+    result = EchoChamberAnalyzer.improved_bimodality_test(values, min_sample_size=50)
+
+    assert result["sample_size"] == 120
+    assert result["bimodal"] is True
+    assert result["separation_index"] > 0.3
+    assert result["bimodality_coefficient"] > 0.555
+    assert result["num_peaks"] >= 2
+    assert result["variance"] == pytest.approx(np.var(values))
+    assert "dip_pvalue" in result
+
+
+def test_echo_chamber_analyzer_improved_bimodality_unimodal_distribution_not_majority_vote():
+    values = np.linspace(-0.2, 0.2, 120)
+
+    result = EchoChamberAnalyzer.improved_bimodality_test(values, min_sample_size=50)
+
+    assert result["sample_size"] == 120
+    assert result["bimodal"] is False
+    assert result["separation_index"] <= 0.3
+    assert result["variance"] == pytest.approx(np.var(values))
+
+
+def test_echo_chamber_analyzer_calculate_bimodality_and_trend_match_notebook_formula():
+    history = {
+        1: {1: -0.5, 2: 0.5, 3: 0.2},
+        2: {1: -0.8, 2: -0.6, 3: 0.6, 4: 0.8, 5: 0.0},
+    }
+
+    trend = EchoChamberAnalyzer.calculate_bimodality_trend(history)
+
+    assert trend.columns.tolist() == ["day", "bimodality"]
+    assert trend["day"].tolist() == [1, 2]
+    assert trend.loc[0, "bimodality"] == 0
+    assert trend.loc[1, "bimodality"] == pytest.approx(
+        EchoChamberAnalyzer.calculate_bimodality(history[2])
+    )
+
+
+def test_echo_chamber_analyzer_build_bimodality_plot_data_returns_notebook_arrays():
+    values = np.concatenate([np.linspace(-0.85, -0.55, 60), np.linspace(0.55, 0.85, 60)])
+
+    result = EchoChamberAnalyzer.build_bimodality_plot_data(values, min_sample_size=50)
+
+    assert set(result) == {
+        "bimodality_result",
+        "hist",
+        "bin_edges",
+        "peaks",
+        "peak_positions",
+        "x_range",
+        "kde_density",
+    }
+    assert len(result["hist"]) == 30
+    assert len(result["bin_edges"]) == 31
+    assert len(result["peak_positions"]) == len(result["peaks"])
+    assert result["x_range"].shape == (200, 1)
+    assert result["kde_density"].shape == (200,)
+
+
 def _pca_user_attitudes():
     return pd.DataFrame(
         {

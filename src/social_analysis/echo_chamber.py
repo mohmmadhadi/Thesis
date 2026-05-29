@@ -710,6 +710,168 @@ class EchoChamberAnalyzer:
         )
 
     @staticmethod
+    def improved_bimodality_test(
+        attitudes_array: list[float] | np.ndarray,
+        min_sample_size: int = 50,
+    ) -> dict[str, Any]:
+        """Run the notebook robust bimodality detection procedure."""
+        n = len(attitudes_array)
+
+        if n < min_sample_size:
+            return {
+                "sample_size": n,
+                "bimodal": False,
+                "reason": "insufficient_data",
+                "dip_statistic": None,
+                "separation_index": None,
+                "variance": np.var(attitudes_array),
+            }
+
+        attitudes_array_np = np.array(attitudes_array)
+
+        try:
+            from diptest import diptest
+
+            dip_stat, pval = diptest(attitudes_array_np)
+            is_bimodal_dip = pval < 0.05
+        except ImportError:
+            dip_stat, pval, is_bimodal_dip = None, None, None
+
+        hist, bin_edges = np.histogram(attitudes_array_np, bins=20, density=True)
+        _ = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        from scipy.signal import find_peaks
+
+        peaks, _ = find_peaks(hist, height=0.1)
+
+        if len(peaks) >= 2:
+            top_peaks = sorted(peaks, key=lambda peak: hist[peak], reverse=True)[:2]
+            left_peak, right_peak = sorted(top_peaks)
+
+            valley_region = hist[left_peak : right_peak + 1]
+            valley_depth = (hist[left_peak] + hist[right_peak]) / 2 - np.min(
+                valley_region
+            )
+            peak_height = (hist[left_peak] + hist[right_peak]) / 2
+
+            separation_index = valley_depth / (peak_height + 1e-6)
+            is_bimodal_separation = separation_index > 0.3
+        else:
+            separation_index = 0
+            is_bimodal_separation = False
+
+        from scipy.stats import kurtosis, skew
+
+        sk = skew(attitudes_array_np)
+        kurt = kurtosis(attitudes_array_np)
+        bc = (
+            (sk**2 + 1) / (kurt + 3 * (n - 1) ** 2 / ((n - 2) * (n - 3)))
+            if n > 3
+            else 0
+        )
+        is_bimodal_bc = bc > 0.555
+
+        votes = sum(
+            [
+                is_bimodal_dip if is_bimodal_dip is not None else False,
+                is_bimodal_separation,
+                is_bimodal_bc,
+            ]
+        )
+
+        return {
+            "sample_size": n,
+            "bimodal": bool(votes >= 2),
+            "dip_statistic": dip_stat,
+            "dip_pvalue": pval,
+            "separation_index": separation_index,
+            "bimodality_coefficient": bc,
+            "num_peaks": len(peaks),
+            "variance": np.var(attitudes_array_np),
+        }
+
+    @staticmethod
+    def calculate_bimodality(attitudes_dict: dict[Any, float]) -> float:
+        """Calculate the notebook bimodality coefficient for user attitudes."""
+        vals = np.array(list(attitudes_dict.values()))
+        n = len(vals)
+        if n <= 3:
+            return 0
+
+        from scipy.stats import kurtosis, skew
+
+        sk = skew(vals)
+        kurt = kurtosis(vals)
+        bc = (sk**2 + 1) / (kurt + 3 * (n - 1) ** 2 / ((n - 2) * (n - 3)))
+        return float(bc)
+
+    @classmethod
+    def calculate_bimodality_trend(
+        cls,
+        propagation_history: dict[Any, dict[Any, float]],
+    ) -> pd.DataFrame:
+        """Return daily bimodality coefficients from propagation history."""
+        days = sorted(propagation_history.keys())
+        return pd.DataFrame(
+            {
+                "day": days,
+                "bimodality": [
+                    cls.calculate_bimodality(propagation_history[day])
+                    for day in days
+                ],
+            }
+        )
+
+    @classmethod
+    def build_bimodality_plot_data(
+        cls,
+        attitudes_array: list[float] | np.ndarray,
+        min_sample_size: int = 50,
+    ) -> dict[str, Any]:
+        """Return histogram, peaks, and KDE data used by the notebook plot."""
+        attitudes_array_np = np.array(attitudes_array)
+        result = cls.improved_bimodality_test(
+            attitudes_array_np,
+            min_sample_size=min_sample_size,
+        )
+
+        hist, bin_edges = np.histogram(
+            attitudes_array_np,
+            bins=30,
+            density=True,
+        )
+
+        from scipy.signal import find_peaks
+
+        peaks, _ = find_peaks(hist, height=0.05)
+        peak_positions = [
+            (bin_edges[peak] + bin_edges[peak + 1]) / 2 for peak in peaks
+        ]
+
+        kde_density = None
+        x_range = None
+        try:
+            from sklearn.neighbors import KernelDensity
+
+            kde = KernelDensity(bandwidth=0.1, kernel="gaussian")
+            kde.fit(attitudes_array_np.reshape(-1, 1))
+            x_range = np.linspace(-1, 1, 200).reshape(-1, 1)
+            log_density = kde.score_samples(x_range)
+            kde_density = np.exp(log_density)
+        except Exception:
+            pass
+
+        return {
+            "bimodality_result": result,
+            "hist": hist,
+            "bin_edges": bin_edges,
+            "peaks": peaks,
+            "peak_positions": peak_positions,
+            "x_range": x_range,
+            "kde_density": kde_density,
+        }
+
+    @staticmethod
     def measure_polarization(attitudes: dict[Any, float]) -> dict[str, float]:
         """Measure variance, bimodality, and inter-group attitude distance."""
         attitudes_array = np.array(list(attitudes.values()))
