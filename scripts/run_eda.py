@@ -16,6 +16,7 @@ if str(SRC_DIR) not in sys.path:
 
 from social_analysis.config import Config
 from social_analysis.data_loader import DataLoader
+from social_analysis.visualization import EDAVisualizer
 
 
 def resolve_project_path(path: str | Path) -> Path:
@@ -108,9 +109,13 @@ def main() -> None:
     paths = config["paths"]
     raw_dir = resolve_project_path(paths["raw_data"])
     processed_dir = resolve_project_path(paths["processed_data"])
-    outputs_dir = resolve_project_path(paths["outputs"])
+    outputs_dir = resolve_project_path(paths["outputs"]) / "01_eda"
+    tables_dir = outputs_dir / "tables"
+    plots_dir = outputs_dir / "plots"
     loader.ensure_directory(processed_dir)
     loader.ensure_directory(outputs_dir)
+    loader.ensure_directory(tables_dir)
+    loader.ensure_directory(plots_dir)
 
     db_path = raw_dir / "local-test.db"
     if not db_path.exists():
@@ -123,6 +128,14 @@ def main() -> None:
     csv_outputs = build_notebook_csvs(tables)
     for filename, dataframe in csv_outputs.items():
         loader.save_dataframe(dataframe, processed_dir / filename)
+        loader.save_dataframe(dataframe, tables_dir / filename)
+
+    visualizer = EDAVisualizer()
+    visualizer.plot_all(
+        csv_outputs["tweets.csv"],
+        csv_outputs["topic_tweets.csv"],
+        plots_dir,
+    )
 
 
 if __name__ == "__main__":

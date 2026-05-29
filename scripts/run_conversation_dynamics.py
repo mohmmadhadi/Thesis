@@ -14,6 +14,7 @@ if str(SRC_DIR) not in sys.path:
 from social_analysis.config import Config
 from social_analysis.conversation_dynamics import ConversationDynamicsPipeline
 from social_analysis.data_loader import DataLoader
+from social_analysis.visualization import ConversationDynamicsVisualizer
 
 
 def resolve_project_path(path: str | Path) -> Path:
@@ -28,6 +29,11 @@ def main() -> None:
     loader = DataLoader(config.settings)
     paths = config["paths"]
     processed_dir = resolve_project_path(paths["processed_data"])
+    outputs_dir = resolve_project_path(paths["outputs"]) / "03_conversation_dynamics"
+    tables_dir = outputs_dir / "tables"
+    plots_dir = outputs_dir / "plots"
+    loader.ensure_directory(tables_dir)
+    loader.ensure_directory(plots_dir)
 
     input_path = processed_dir / "sentiment_results.csv"
     if not input_path.exists():
@@ -43,7 +49,17 @@ def main() -> None:
     tweet_level, summaries = pipeline.run(data)
     loader.save_dataframe(tweet_level, processed_dir / "tweet_level_dynamics.csv")
     loader.save_dataframe(summaries, processed_dir / "thread_summaries.csv")
-    # TODO: notebook plotting routines have not been extracted into this script.
+    loader.save_dataframe(tweet_level, tables_dir / "tweet_level_dynamics.csv")
+    loader.save_dataframe(summaries, tables_dir / "thread_summaries.csv")
+
+    visualizer = ConversationDynamicsVisualizer()
+    signal = config.get("conversation", {}).get("signal", "roberta_compound")
+    visualizer.plot_sample_threads(tweet_level, summaries, signal=signal, out_dir=plots_dir)
+    visualizer.plot_arc_distribution(summaries, out_dir=plots_dir)
+    visualizer.plot_emotion_heatmap(summaries, out_dir=plots_dir)
+    visualizer.plot_sentiment_over_relative_position(tweet_level, signal=signal, out_dir=plots_dir)
+    visualizer.plot_valence_arousal_by_arc(summaries, out_dir=plots_dir)
+    visualizer.plot_changepoint_timing(summaries, out_dir=plots_dir)
 
 
 if __name__ == "__main__":

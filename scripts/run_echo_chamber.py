@@ -17,6 +17,7 @@ if str(SRC_DIR) not in sys.path:
 from social_analysis.config import Config
 from social_analysis.data_loader import DataLoader
 from social_analysis.echo_chamber import EchoChamberPipeline
+from social_analysis.visualization import EchoChamberVisualizer, SentimentEmotionVisualizer
 
 
 def resolve_project_path(path: str | Path) -> Path:
@@ -31,8 +32,11 @@ def main() -> None:
     loader = DataLoader(config.settings)
     paths = config["paths"]
     processed_dir = resolve_project_path(paths["processed_data"])
-    outputs_dir = resolve_project_path(paths["outputs"])
-    loader.ensure_directory(outputs_dir)
+    outputs_dir = resolve_project_path(paths["outputs"]) / "07_echo_chamber"
+    tables_dir = outputs_dir / "tables"
+    plots_dir = outputs_dir / "plots"
+    loader.ensure_directory(tables_dir)
+    loader.ensure_directory(plots_dir)
 
     input_path = processed_dir / "sentiment_results.csv"
     if not input_path.exists():
@@ -51,26 +55,31 @@ def main() -> None:
 
     loader.save_dataframe(results["tweets"], processed_dir / "echo_chamber_tweets.csv")
     loader.save_dataframe(results["user_attitudes"], processed_dir / "echo_chamber_user_attitudes.csv")
-    loader.save_dataframe(results["community_stats"].reset_index(), outputs_dir / "echo_chamber_communities.csv")
+    loader.save_dataframe(results["tweets"], tables_dir / "echo_chamber_tweets.csv")
+    loader.save_dataframe(results["user_attitudes"], tables_dir / "echo_chamber_user_attitudes.csv")
+    loader.save_dataframe(results["community_stats"].reset_index(), tables_dir / "echo_chamber_communities.csv")
     loader.save_dataframe(
         pd.DataFrame([results["graph_stats"]]),
-        outputs_dir / "echo_chamber_graph_stats.csv",
+        tables_dir / "echo_chamber_graph_stats.csv",
     )
     loader.save_dataframe(
         pd.DataFrame([results["polarization"]]),
-        outputs_dir / "echo_chamber_polarization.csv",
+        tables_dir / "echo_chamber_polarization.csv",
     )
     loader.save_dataframe(
         pd.DataFrame([results["homophily"]]),
-        outputs_dir / "echo_chamber_homophily.csv",
+        tables_dir / "echo_chamber_homophily.csv",
     )
     loader.save_dataframe(
         pd.DataFrame([results["echo_chamber_metrics"]]),
-        outputs_dir / "echo_chamber_metrics.csv",
+        tables_dir / "echo_chamber_metrics.csv",
     )
-    with (outputs_dir / "echo_chamber_communities.json").open("w", encoding="utf-8") as handle:
+    with (tables_dir / "echo_chamber_communities.json").open("w", encoding="utf-8") as handle:
         json.dump(results["communities"], handle, indent=2)
-    # TODO: notebook plotting and topic-specific filtering have not been extracted into this script.
+
+    SentimentEmotionVisualizer().plot_sentiment_distribution(results["tweets"], plots_dir)
+    EchoChamberVisualizer().plot_all(results, plots_dir)
+    # TODO: notebook topic-specific filtering and advanced sensitivity/landscape plots need confirmed inputs.
 
 
 if __name__ == "__main__":

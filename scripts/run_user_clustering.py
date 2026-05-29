@@ -14,6 +14,7 @@ if str(SRC_DIR) not in sys.path:
 from social_analysis.config import Config
 from social_analysis.data_loader import DataLoader
 from social_analysis.user_clustering import TweetClusterer, UserClusterer
+from social_analysis.visualization import UserClusteringVisualizer
 
 
 def resolve_project_path(path: str | Path) -> Path:
@@ -28,6 +29,11 @@ def main() -> None:
     loader = DataLoader(config.settings)
     paths = config["paths"]
     processed_dir = resolve_project_path(paths["processed_data"])
+    outputs_dir = resolve_project_path(paths["outputs"]) / "06_user_clustering"
+    tables_dir = outputs_dir / "tables"
+    html_dir = outputs_dir / "html"
+    loader.ensure_directory(tables_dir)
+    loader.ensure_directory(html_dir)
 
     tweets_path = processed_dir / "tweets.csv"
     user_demo_path = processed_dir / "user_demo.csv"
@@ -66,10 +72,21 @@ def main() -> None:
     agents = user_clusterer.add_rate_features(agents, raw_tweets, text_col=text_col)
     agents = user_clusterer.add_reply_coherence(agents, reply_sim)
     agent_clusters = user_clusterer.fit_transform_agents(agents)
+    if user_clusterer.x_2d_ is not None:
+        agent_clusters["PC1"] = user_clusterer.x_2d_[:, 0]
+        agent_clusters["PC2"] = user_clusterer.x_2d_[:, 1]
+    if "hdbscan_cluster" in agent_clusters.columns:
+        agent_clusters["Agent_Cluster"] = agent_clusters["hdbscan_cluster"].astype(str)
 
     loader.save_dataframe(tweet_clusters, processed_dir / "tweet_clusters.csv")
     loader.save_dataframe(agent_clusters, processed_dir / "agent_clusters.csv")
-    # TODO: notebook interactive HTML plots have not been extracted into this script.
+    loader.save_dataframe(tweet_clusters, tables_dir / "tweet_clusters.csv")
+    loader.save_dataframe(agent_clusters, tables_dir / "agent_clusters.csv")
+
+    visualizer = UserClusteringVisualizer()
+    visualizer.save_tweet_clusters_html(tweet_clusters, html_dir)
+    visualizer.save_agent_clusters_html(agent_clusters, html_dir)
+    # TODO: trait-specific tweet cluster and heatmap HTML plots require confirmed trait columns.
 
 
 if __name__ == "__main__":

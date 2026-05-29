@@ -16,6 +16,7 @@ if str(SRC_DIR) not in sys.path:
 from social_analysis.config import Config
 from social_analysis.data_loader import DataLoader
 from social_analysis.topic_modeling import TopicModelingPipeline
+from social_analysis.visualization import TopicModelingVisualizer
 
 
 def resolve_project_path(path: str | Path) -> Path:
@@ -30,8 +31,13 @@ def main() -> None:
     loader = DataLoader(config.settings)
     paths = config["paths"]
     processed_dir = resolve_project_path(paths["processed_data"])
-    outputs_dir = resolve_project_path(paths["outputs"])
-    loader.ensure_directory(outputs_dir)
+    outputs_dir = resolve_project_path(paths["outputs"]) / "05_topic_modeling"
+    tables_dir = outputs_dir / "tables"
+    plots_dir = outputs_dir / "plots"
+    html_dir = outputs_dir / "html"
+    loader.ensure_directory(tables_dir)
+    loader.ensure_directory(plots_dir)
+    loader.ensure_directory(html_dir)
 
     tweets_path = processed_dir / "tweets.csv"
     sentiment_path = processed_dir / "sentiment_results.csv"
@@ -51,10 +57,12 @@ def main() -> None:
 
     loader.save_dataframe(topic_df, processed_dir / "topicmodel_tweets.csv")
     loader.save_dataframe(topic_drift, processed_dir / "topic_drift.csv")
-    loader.save_dataframe(results["bertopic_topic_info"], outputs_dir / "bertopic_topic_info.csv")
+    loader.save_dataframe(topic_df, tables_dir / "topicmodel_tweets.csv")
+    loader.save_dataframe(topic_drift, tables_dir / "topic_drift.csv")
+    loader.save_dataframe(results["bertopic_topic_info"], tables_dir / "bertopic_topic_info.csv")
     loader.save_dataframe(
         pd.DataFrame(results["lda_top_words"], columns=["topic_id", "top_words"]),
-        outputs_dir / "lda_top_words.csv",
+        tables_dir / "lda_top_words.csv",
     )
     pd.DataFrame(
         [
@@ -63,7 +71,16 @@ def main() -> None:
                 "lda_log_perplexity": results["lda_log_perplexity"],
             }
         ]
-    ).to_csv(outputs_dir / "topic_modeling_metrics.csv", index=False)
+    ).to_csv(tables_dir / "topic_modeling_metrics.csv", index=False)
+
+    visualizer = TopicModelingVisualizer()
+    visualizer.plot_topic_counts(topic_df, plots_dir)
+    visualizer.save_pyldavis(
+        results["lda_model"],
+        results["corpus"],
+        results["dictionary"],
+        html_dir,
+    )
 
 
 if __name__ == "__main__":
