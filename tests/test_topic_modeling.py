@@ -11,7 +11,9 @@ from social_analysis.topic_modeling import (
     BERTopicModeler,
     LDATopicModeler,
     TopicModelingPipeline,
+    token_length_report,
 )
+from social_analysis.visualization import TopicModelingVisualizer
 
 
 class FakeLemmatizer:
@@ -29,6 +31,9 @@ class FakeDictionary:
 
     def doc2bow(self, tokens):
         return list(enumerate(tokens))
+
+    def __len__(self):
+        return 42
 
 
 class FakeLDAModel:
@@ -58,6 +63,28 @@ class FakeTopicModel:
                 "Count": [1, 1],
             }
         )
+
+
+class FakeFigure:
+    def __init__(self):
+        self.path = None
+
+    def write_html(self, path):
+        self.path = Path(path)
+        self.path.write_text("<html></html>", encoding="utf-8")
+
+
+class FakeVisualTopicModel(FakeTopicModel):
+    def __init__(self):
+        super().__init__()
+        self.barchart_args = None
+
+    def visualize_barchart(self, top_n_topics=10):
+        self.barchart_args = {"top_n_topics": top_n_topics}
+        return FakeFigure()
+
+    def visualize_topics(self):
+        return FakeFigure()
 
 
 def simple_tokenizer(text):
@@ -120,6 +147,25 @@ def test_get_top_words_formats_topics_as_one_based_ids():
     ]
 
 
+def test_lda_report_tables_preserve_notebook_columns():
+    top_words = [(1, '0.7*"ai"'), (2, '0.5*"policy"')]
+    top_words_table = LDATopicModeler.top_words_table(top_words)
+    corpus_report = LDATopicModeler.corpus_report(FakeDictionary([]), [[], []])
+    evaluation = LDATopicModeler.evaluation_report(0.51, -3.14)
+
+    assert top_words_table.columns.tolist() == ["topic_id", "top_words"]
+    assert top_words_table["topic_id"].tolist() == [1, 2]
+    assert corpus_report.columns.tolist() == ["vocabulary_size", "corpus_size"]
+    assert corpus_report.iloc[0].to_dict() == {"vocabulary_size": 42, "corpus_size": 2}
+    assert evaluation.columns.tolist() == [
+        "lda_coherence",
+        "lda_log_perplexity",
+        "coherence_note",
+        "perplexity_note",
+    ]
+    assert evaluation.loc[0, "lda_coherence"] == 0.51
+
+
 def test_assign_topics_uses_dominant_document_topic():
     modeler = make_lda_modeler()
     df = pd.DataFrame({"tweet": ["a", "b"]})
@@ -143,6 +189,35 @@ def test_bertopic_assign_topics_and_names_with_fake_model():
 
     assert result["bertopic_topic"].tolist() == [0, -1]
     assert result["bertopic_topic_name"].tolist() == ["0_ai_health", "-1_outliers"]
+
+
+def test_bertopic_reports_topic_names_and_outliers():
+    modeler = BERTopicModeler(topic_model=FakeTopicModel())
+    topic_names = modeler.topic_name_mapping()
+    mapping_table = BERTopicModeler.topic_name_mapping_table(topic_names)
+    outliers = BERTopicModeler.outlier_report([0, 1, -1, -1])
+
+    assert topic_names == {0: "0_ai_health", -1: "-1_outliers"}
+    assert mapping_table.columns.tolist() == ["Topic", "Name"]
+    assert mapping_table["Topic"].tolist() == [0, -1]
+    assert outliers.columns.tolist() == [
+        "num_topics_excluding_outliers",
+        "outlier_tweets",
+    ]
+    assert outliers.iloc[0].to_dict() == {
+        "num_topics_excluding_outliers": 2,
+        "outlier_tweets": 2,
+    }
+
+
+def test_token_length_report_adds_length_and_describe_table():
+    df = pd.DataFrame({"tokens": [["ai", "health"], ["policy"]]})
+
+    result = token_length_report(df)
+
+    assert result["data"]["length"].tolist() == [2, 1]
+    assert result["describe"].columns.tolist() == ["value"]
+    assert result["describe"].loc["count", "value"] == 2.0
 
 
 def test_build_topic_drift_preserves_notebook_columns_and_renames_sentiment():
@@ -180,6 +255,29 @@ def test_build_topic_drift_preserves_notebook_columns_and_renames_sentiment():
         "sentiment",
     ]
     assert result.loc[0, "sentiment"] == "positive"
+
+
+def test_topic_visualizer_bertopic_html_exports_use_notebook_filenames(tmp_path):
+    model = FakeVisualTopicModel()
+    visualizer = TopicModelingVisualizer()
+
+    barchart = visualizer.save_bertopic_barchart_html(model, tmp_path)
+    topics = visualizer.save_bertopic_topics_html(model, tmp_path)
+
+    assert barchart == tmp_path / "bertopic_barchart.html"
+    assert topics == tmp_path / "bertopic_topics.html"
+    assert barchart.exists()
+    assert topics.exists()
+    assert model.barchart_args == {"top_n_topics": 10}
+
+
+def test_topic_visualizer_plot_methods_skip_missing_columns(tmp_path):
+    visualizer = TopicModelingVisualizer()
+    df = pd.DataFrame({"tweet": ["hello"]})
+
+    assert visualizer.plot_lda_topic_distribution(df, tmp_path) is None
+    assert visualizer.plot_token_length_distribution(df, tmp_path) is None
+    assert visualizer.save_bertopic_barchart_html(object(), tmp_path) is None
 
 
 def test_fit_requires_dictionary_and_corpus():

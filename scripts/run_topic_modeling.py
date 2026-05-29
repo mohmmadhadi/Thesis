@@ -60,25 +60,38 @@ def main() -> None:
     loader.save_dataframe(topic_df, tables_dir / "topicmodel_tweets.csv")
     loader.save_dataframe(topic_drift, tables_dir / "topic_drift.csv")
     loader.save_dataframe(results["bertopic_topic_info"], tables_dir / "bertopic_topic_info.csv")
+    loader.save_dataframe(results["lda_top_words_table"], tables_dir / "lda_top_words.csv")
+    loader.save_dataframe(results["lda_evaluation_report"], tables_dir / "topic_modeling_metrics.csv")
+    loader.save_dataframe(results["corpus_report"], tables_dir / "corpus_report.csv")
     loader.save_dataframe(
-        pd.DataFrame(results["lda_top_words"], columns=["topic_id", "top_words"]),
-        tables_dir / "lda_top_words.csv",
+        results["bertopic_topic_name_mapping_table"],
+        tables_dir / "bertopic_topic_names.csv",
     )
-    pd.DataFrame(
-        [
-            {
-                "lda_coherence": results["lda_coherence"],
-                "lda_log_perplexity": results["lda_log_perplexity"],
-            }
-        ]
-    ).to_csv(tables_dir / "topic_modeling_metrics.csv", index=False)
+    loader.save_dataframe(
+        results["bertopic_outlier_report"],
+        tables_dir / "bertopic_outlier_report.csv",
+    )
+    loader.save_dataframe(
+        results["token_length_describe"],
+        tables_dir / "token_length_describe.csv",
+    )
 
     visualizer = TopicModelingVisualizer()
+    visualizer.plot_lda_topic_distribution(topic_df, plots_dir)
+    visualizer.plot_token_length_distribution(topic_df, plots_dir)
     visualizer.plot_topic_counts(topic_df, plots_dir)
     visualizer.save_pyldavis(
         results["lda_model"],
         results["corpus"],
         results["dictionary"],
+        html_dir,
+    )
+    visualizer.save_bertopic_barchart_html(
+        pipeline.bertopic_modeler.topic_model,
+        html_dir,
+    )
+    visualizer.save_bertopic_topics_html(
+        pipeline.bertopic_modeler.topic_model,
         html_dir,
     )
 

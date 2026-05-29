@@ -145,6 +145,40 @@ class LDATopicModeler:
             raise ValueError("LDA model has not been fitted.")
         return [(idx + 1, topic) for idx, topic in lda_model.print_topics(-1)]
 
+    @staticmethod
+    def top_words_table(top_words: list[tuple[int, str]]) -> pd.DataFrame:
+        """Return notebook top words per topic as a report table."""
+        return pd.DataFrame(top_words, columns=["topic_id", "top_words"])
+
+    @staticmethod
+    def corpus_report(dictionary: Any, corpus: list[Any]) -> pd.DataFrame:
+        """Return vocabulary and corpus size report from notebook cell 12."""
+        return pd.DataFrame(
+            [
+                {
+                    "vocabulary_size": len(dictionary),
+                    "corpus_size": len(corpus),
+                }
+            ]
+        )
+
+    @staticmethod
+    def evaluation_report(coherence_score: float, log_perplexity: float) -> pd.DataFrame:
+        """Return LDA coherence and log-perplexity report table."""
+        return pd.DataFrame(
+            [
+                {
+                    "lda_coherence": coherence_score,
+                    "lda_log_perplexity": log_perplexity,
+                    "coherence_note": "C_v > 0.5 is generally good.",
+                    "perplexity_note": (
+                        "Perplexity is lower = better, but coherence is the more "
+                        "interpretable metric for topic quality."
+                    ),
+                }
+            ]
+        )
+
     def compute_coherence(
         self,
         texts: list[list[str]],
@@ -275,6 +309,46 @@ class BERTopicModeler:
         result[topic_name_col] = result[topic_col].map(topic_names)
         return result
 
+    def topic_name_mapping(self) -> dict[int, str]:
+        """Return BERTopic-generated topic name mapping."""
+        return self.get_topic_info().set_index("Topic")["Name"].to_dict()
+
+    @staticmethod
+    def topic_name_mapping_table(topic_names: dict[int, str]) -> pd.DataFrame:
+        """Return BERTopic topic-name mapping table."""
+        return pd.DataFrame(
+            [{"Topic": topic, "Name": name} for topic, name in topic_names.items()]
+        )
+
+    @staticmethod
+    def outlier_report(topics: list[int] | pd.Series) -> pd.DataFrame:
+        """Return BERTopic topic/outlier counts from notebook cell 19."""
+        topic_series = pd.Series(topics)
+        return pd.DataFrame(
+            [
+                {
+                    "num_topics_excluding_outliers": int(
+                        topic_series.nunique() - (1 if -1 in topic_series.values else 0)
+                    ),
+                    "outlier_tweets": int((topic_series == -1).sum()),
+                }
+            ]
+        )
+
+
+def token_length_report(
+    df: pd.DataFrame,
+    tokens_col: str = "tokens",
+    length_col: str = "length",
+) -> dict[str, Any]:
+    """Add token lengths and return notebook descriptive stats."""
+    result = df.copy()
+    result[length_col] = result[tokens_col].apply(len)
+    return {
+        "data": result,
+        "describe": result[length_col].describe().round(2).to_frame("value"),
+    }
+
 
 class TopicModelingPipeline:
     """Coordinate the notebook's LDA and BERTopic workflow."""
@@ -311,16 +385,33 @@ class TopicModelingPipeline:
         )
         perplexity = self.lda_modeler.compute_log_perplexity(corpus, lda_model)
         topic_df = self.bertopic_modeler.assign_topics(topic_df)
-        topic_df["length"] = topic_df["tokens"].apply(len)
+        length_report = token_length_report(topic_df)
+        topic_df = length_report["data"]
+        lda_top_words = self.lda_modeler.get_top_words(lda_model)
+        topic_names = self.bertopic_modeler.topic_name_mapping()
         return {
             "data": topic_df,
             "dictionary": dictionary,
             "corpus": corpus,
             "lda_model": lda_model,
-            "lda_top_words": self.lda_modeler.get_top_words(lda_model),
+            "lda_top_words": lda_top_words,
+            "lda_top_words_table": self.lda_modeler.top_words_table(lda_top_words),
             "lda_coherence": coherence,
             "lda_log_perplexity": perplexity,
+            "lda_evaluation_report": self.lda_modeler.evaluation_report(
+                coherence,
+                perplexity,
+            ),
+            "corpus_report": self.lda_modeler.corpus_report(dictionary, corpus),
             "bertopic_topic_info": self.bertopic_modeler.get_topic_info(),
+            "bertopic_topic_name_mapping": topic_names,
+            "bertopic_topic_name_mapping_table": self.bertopic_modeler.topic_name_mapping_table(
+                topic_names
+            ),
+            "bertopic_outlier_report": self.bertopic_modeler.outlier_report(
+                topic_df["bertopic_topic"]
+            ),
+            "token_length_describe": length_report["describe"],
         }
 
     @staticmethod

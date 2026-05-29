@@ -837,6 +837,79 @@ class TopicModelingVisualizer:
         plt.close(fig)
         return output_path
 
+    def plot_lda_topic_distribution(
+        self,
+        topic_df: pd.DataFrame,
+        out_dir: str | Path,
+        topic_col: str = "lda_topic",
+    ) -> Path | None:
+        """Plot notebook LDA topic distribution across documents."""
+        if topic_col not in topic_df.columns:
+            return None
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        output_path = self._prepare_out_dir(out_dir) / "lda_topic_distribution.png"
+        fig, ax = plt.subplots(figsize=(10, 5))
+        sns.countplot(x=topic_df[topic_col], color="steelblue", ax=ax)
+        ax.set_title("LDA -- Topic Distribution Across Documents")
+        ax.set_xlabel("Topic ID")
+        ax.set_ylabel("Number of Documents")
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=FIG_DPI, bbox_inches="tight")
+        plt.close(fig)
+        return output_path
+
+    def plot_token_length_distribution(
+        self,
+        topic_df: pd.DataFrame,
+        out_dir: str | Path,
+        length_col: str = "length",
+    ) -> Path | None:
+        """Plot notebook token count distribution after preprocessing."""
+        if length_col not in topic_df.columns:
+            return None
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        output_path = self._prepare_out_dir(out_dir) / "token_length_distribution.png"
+        fig, ax = plt.subplots(figsize=(10, 5))
+        sns.histplot(topic_df[length_col], bins=30, kde=True, color="steelblue", ax=ax)
+        ax.set_title("Distribution of Token Counts (after preprocessing)")
+        ax.set_xlabel("Token Count")
+        ax.set_ylabel("Frequency")
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=FIG_DPI, bbox_inches="tight")
+        plt.close(fig)
+        return output_path
+
+    def save_bertopic_barchart_html(
+        self,
+        topic_model: Any,
+        out_dir: str | Path,
+        top_n_topics: int = 10,
+    ) -> Path | None:
+        """Save BERTopic top-word barchart HTML from notebook cell 20."""
+        if topic_model is None or not hasattr(topic_model, "visualize_barchart"):
+            return None
+        output_path = self._prepare_out_dir(out_dir) / "bertopic_barchart.html"
+        fig = topic_model.visualize_barchart(top_n_topics=top_n_topics)
+        fig.write_html(output_path)
+        return output_path
+
+    def save_bertopic_topics_html(
+        self,
+        topic_model: Any,
+        out_dir: str | Path,
+    ) -> Path | None:
+        """Save BERTopic 2D inter-topic distance map HTML from notebook cell 21."""
+        if topic_model is None or not hasattr(topic_model, "visualize_topics"):
+            return None
+        output_path = self._prepare_out_dir(out_dir) / "bertopic_topics.html"
+        fig = topic_model.visualize_topics()
+        fig.write_html(output_path)
+        return output_path
+
 
 class UserClusteringVisualizer:
     """Reusable Plotly visualizations from notebook 06."""
